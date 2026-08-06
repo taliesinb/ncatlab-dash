@@ -4,3 +4,5 @@ dist-mini/
 __pycache__/
 .DS_Store
 rewrites/*.db
+rewrites/out/
+rewrites/bin/
