@@ -37,12 +37,13 @@ def main() -> None:
     con = common.connect()
     common.renders_table(con)
 
-    done = set() if args.force else {
-        r[0] for r in con.execute(
-            "SELECT hash FROM renders WHERE kind='typst'")}
+    done = {} if args.force else {
+        r[0]: r[1] for r in con.execute(
+            "SELECT hash, codehash FROM renders WHERE kind='typst'"
+            " AND status='ok'")}
     todo = [(r["hash"], r["code"]) for r in con.execute(
         "SELECT hash, code FROM typst WHERE status='ok'")
-        if r["hash"] not in done]
+        if done.get(r["hash"]) != common.text_hash(r["code"])]
     if args.hashes:
         wanted = set(open(args.hashes).read().split())
         todo = [(h, c) for r in con.execute(
@@ -51,15 +52,16 @@ def main() -> None:
     if args.limit:
         todo = todo[:args.limit]
 
+    codes = dict(todo)
     ok = err = 0
     with ThreadPoolExecutor(max_workers=args.jobs) as pool:
         for hash_, status, error in pool.map(
                 lambda t: compile_one(*t), todo):
             con.execute(
-                "INSERT OR REPLACE INTO renders VALUES (?,?,?,?,?)",
+                "INSERT OR REPLACE INTO renders VALUES (?,?,?,?,?,?)",
                 (hash_, "typst", status,
                  f"out/typst/{hash_}.png" if status == "ok" else None,
-                 error))
+                 error, common.text_hash(codes[hash_])))
             ok += status == "ok"
             err += status != "ok"
             if (ok + err) % 200 == 0:

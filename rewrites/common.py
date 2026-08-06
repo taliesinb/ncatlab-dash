@@ -57,6 +57,14 @@ def renders_table(con: sqlite3.Connection) -> None:
     con.execute("CREATE TABLE IF NOT EXISTS renders("
                 "hash TEXT, kind TEXT, status TEXT, path TEXT, error TEXT,"
                 "PRIMARY KEY (hash, kind))")
+    cols = [r[1] for r in con.execute("PRAGMA table_info(renders)")]
+    if "codehash" not in cols:
+        # Invalidates cached renders when the emitted code changes.
+        con.execute("ALTER TABLE renders ADD COLUMN codehash TEXT")
+
+
+def text_hash(text: str) -> str:
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()[:16]
 
 
 def report(con: sqlite3.Connection, table: str, column: str) -> None:

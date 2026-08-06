@@ -30,19 +30,33 @@ TEX_FIXUPS = [
     (re.compile(r"\\hspace\s*\{[^{}]*\}"), r"\\;"),
     # itex sets | as an ordinary symbol; mitex spaces it as a relation.
     (re.compile(r"(?<![\\{])\|"), r"{\\mid}"),
+    (re.compile(r"\\mathscr\b"), r"\\mathcal"),  # mitex lacks \mathscr
     (re.compile(r"\s+"), " "),
 ]
 
 # itex groups a run of letters into one upright identifier (Set, Tmf, op,
 # coim); LaTeX/mitex would typeset them as a product of italic variables.
+# Arguments of text-like commands are already words and must not be
+# rewrapped (\text{\mathrm{field}} renders literally).
 WORD_RE = re.compile(r"(\\[a-zA-Z]+)|([a-zA-Z]{2,})")
+PROTECTED_RE = re.compile(
+    r"\\(?:text|mathrm|mathit|mathbf|mathsf|mathtt|operatorname|mathcal"
+    r"|mathfrak|mathscr|mathbb)\s*\{[^{}]*\}")
 
 
 def fix_tex(tex: str) -> str:
     for pat, rep in TEX_FIXUPS:
         tex = pat.sub(rep, tex)
+    saved: list[str] = []
+
+    def stash(m):
+        saved.append(m.group(0))
+        return f"\x00{len(saved) - 1}\x00"
+
+    tex = PROTECTED_RE.sub(stash, tex)
     tex = WORD_RE.sub(
         lambda m: m.group(1) or r"\mathrm{%s}" % m.group(2), tex)
+    tex = re.sub(r"\x00(\d+)\x00", lambda m: saved[int(m.group(1))], tex)
     return tex.strip()
 
 PREAMBLE = f"""#import "{FLETCHER}": diagram, node, edge
@@ -52,19 +66,21 @@ PREAMBLE = f"""#import "{FLETCHER}": diagram, node, edge
 """
 
 MARKS = {"r": "->", "l": "->", "lr": "<->", "u": "->", "d": "->",
-         "se": "->", "sw": "->", "ne": "->", "nw": "->", "~": "-"}
+         "se": "->", "sw": "->", "ne": "->", "nw": "->", "~": "-",
+         "veq": "="}
 TILDE_LABEL = {"simeq": r"\simeq", "cong": r"\cong", "equiv": r"\equiv",
                "=": "="}
 HOOK = {"hookrightarrow": "hook->", "hookleftarrow": "hook->",
         "twoheadrightarrow": "->>", "twoheadleftarrow": "->>",
         "mapsto": "|->", "longmapsto": "|->",
-        "Rightarrow": "=>", "Leftarrow": "=>"}
+        "Rightarrow": "=>", "Leftarrow": "=>",
+        "seArrow": "=>", "swArrow": "=>", "neArrow": "=>", "nwArrow": "=>"}
 
 STEPS = {"se": (1, 1), "sw": (1, -1), "ne": (-1, 1), "nw": (-1, -1)}
 
 # Travel vector (dx, dy; screen coords, y down) per arrow direction.
 TRAVEL = {"r": (1, 0), "l": (-1, 0), "lr": (1, 0), "~": (1, 0),
-          "d": (0, 1), "u": (0, -1),
+          "d": (0, 1), "u": (0, -1), "veq": (0, 1),
           "se": (1, 1), "sw": (-1, 1), "ne": (1, -1), "nw": (-1, -1)}
 # Where the author's script puts a label, as a viewer-space vector.
 WANT = {"above": (0, -1), "below": (0, 1), "east": (1, 0), "west": (-1, 0)}
@@ -112,6 +128,10 @@ def emit(grid) -> tuple[str, str | None]:
                 b = nearest_object(grid, r, c, 0, 1)
                 if cell["dir"] == "l":
                     a, b = b, a
+                if cell["dir"] == "~" and (a is None or b is None):
+                    # An equals used vertically between object rows.
+                    a = nearest_object(grid, r, c, -1, 0)
+                    b = nearest_object(grid, r, c, 1, 0)
             elif k == "v":
                 a = nearest_object(grid, r, c, -1, 0)
                 b = nearest_object(grid, r, c, 1, 0)
@@ -124,6 +144,11 @@ def emit(grid) -> tuple[str, str | None]:
             if a is None or b is None:
                 return "dangling", None
             edges.append((a, b, cell))
+
+    if not edges:
+        # No arrows at all: an alignment table (often swept in by \vec's
+        # combining arrow glyph), which the original MathML renders fine.
+        return "no-edges", None
 
     # An object no arrow touches, sitting right next to one that is an
     # endpoint, is an annotation ("c \in" before "[X, A_s]"): merge it.
@@ -146,8 +171,12 @@ def emit(grid) -> tuple[str, str | None]:
     def coord(rc):
         return f"({cmap[rc[1]]}, {rmap[rc[0]]})"
 
-    lines = [f"  node({coord(rc)}, mi({ts(cell['tex'])})),"
-             for rc, cell in sorted(objects.items())]
+    # Objects are display-style (limits under sums/products); edge labels
+    # stay inline and small.
+    lines = []
+    for rc, cell in sorted(objects.items()):
+        label = ts("\\displaystyle " + cell["tex"])
+        lines.append(f"  node({coord(rc)}, mi({label})),")
 
     max_x = max(cmap.values())
     for a, b, cell in edges:
@@ -166,10 +195,18 @@ def emit(grid) -> tuple[str, str | None]:
                 cell[outward] = cell.pop(placement)
                 placement = outward
         if cell["dir"] == "~":
-            sym = TILDE_LABEL.get(cell.get("cmd", "="), "=")
-            args.append(f"label: mi({ts(sym)})")
+            if cell.get("cmd") == "=":
+                args[2] = '"="'  # double-line equality edge
+                if placement:
+                    args.append(
+                        f"label: text(0.75em, mi({ts(cell[placement])}))")
+                    args.append(
+                        f"label-side: {label_side('~', placement)}")
+            else:
+                sym = TILDE_LABEL.get(cell.get("cmd", ""), "=")
+                args.append(f"label: text(0.75em, mi({ts(sym)}))")
         elif placement:
-            args.append(f"label: mi({ts(cell[placement])})")
+            args.append(f"label: text(0.75em, mi({ts(cell[placement])}))")
             args.append(f"label-side: {label_side(cell['dir'], placement)}")
         if cell.get("cmd") in ("rightrightarrows", "leftleftarrows"):
             lines.append(f"  edge({', '.join(args)}, shift: 2pt),")

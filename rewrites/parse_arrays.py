@@ -38,7 +38,9 @@ H_CMDS = {
     "leftrightarrow": "lr", "simeq": "~", "cong": "~", "equiv": "~",
 }
 V_CMDS = {"downarrow": "d", "Downarrow": "d", "uparrow": "u", "Uparrow": "u"}
-D_CMDS = {"searrow": "se", "swarrow": "sw", "nearrow": "ne", "nwarrow": "nw"}
+D_CMDS = {"searrow": "se", "swarrow": "sw", "nearrow": "ne", "nwarrow": "nw",
+          # itex's double diagonal arrows
+          "seArrow": "se", "swArrow": "sw", "neArrow": "ne", "nwArrow": "nw"}
 
 CMD_RE = re.compile(r"\\([a-zA-Z]+)")
 # \stackrel{lbl}{arrow} / \overset{lbl}{arrow} / \underset{lbl}{arrow}
@@ -110,10 +112,42 @@ def read_group(text: str) -> tuple[str, str]:
     return text[0], text[1:]
 
 
+def extract_laps(s: str) -> tuple[str, str | None, str | None]:
+    """Pull \\mathllap{...} (west) and \\mathrlap{...} (east) out of a cell,
+    returning the remainder."""
+    west = east = None
+    for cmd, side in (("\\mathllap", "west"), ("\\mathrlap", "east")):
+        i = s.find(cmd)
+        if i < 0:
+            continue
+        body, rest = read_group(s[i + len(cmd):])
+        s = s[:i] + " " + rest
+        if side == "west":
+            west = body
+        else:
+            east = body
+    return s.strip(), west, east
+
+
+def spanning_parens(s: str) -> bool:
+    """True when the whole cell is one parenthesized group."""
+    if s.startswith("\\left(") and s.endswith("\\right)"):
+        return True
+    if not (s.startswith("(") and s.endswith(")")):
+        return False
+    depth = 0
+    for i, c in enumerate(s):
+        depth += (c == "(") - (c == ")")
+        if depth == 0 and i < len(s) - 1:
+            return False
+    return depth == 0
+
+
 def classify_cell(cell: str) -> dict:
     s = cell.strip()
     if not s:
         return {"k": "e"}
+    s = re.sub(r"\\[bB]igg?\b", "", s).strip()  # \big etc. are cosmetic
 
     # \stackrel{f}{\to} and friends
     m = OVER_RE.match(s)
@@ -126,6 +160,12 @@ def classify_cell(cell: str) -> dict:
             label, rest = read_group(rest)
         arrow, rest2 = read_group(rest)
         if not rest2.strip():
+            if arrow.strip() in ("=", "\\simeq", "\\cong"):
+                res = {"k": "h", "dir": "~",
+                       "cmd": arrow.strip().lstrip("\\") or "="}
+                res["below" if which == "underset" else "above"] = \
+                    label.strip()
+                return res
             cmds = CMD_RE.findall(arrow)
             if len(cmds) == 1 and cmds[0] in H_CMDS and \
                     arrow.strip() == "\\" + cmds[0]:
@@ -151,7 +191,22 @@ def classify_cell(cell: str) -> dict:
             return {"k": "d", "dir": D_CMDS[c], "cmd": c}
 
     # \downarrow^{\mathrlap{f}} / \uparrow_{...} / {}^{f}\downarrow
-    # A pre-script sits to the arrow's west, a post-script to its east.
+    # \mathllap{f}\downarrow / \downarrow\mathrlap{f}
+    # A pre-script/llap sits to the arrow's west, post-script/rlap east.
+    s_nolap, lap_west, lap_east = extract_laps(s)
+    if lap_west or lap_east:
+        cmds_nolap = CMD_RE.findall(s_nolap)
+        if len(cmds_nolap) == 1 and s_nolap == "\\" + cmds_nolap[0] and \
+                cmds_nolap[0] in {**V_CMDS, **D_CMDS}:
+            c = cmds_nolap[0]
+            res = {"k": "v" if c in V_CMDS else "d",
+                   "dir": V_CMDS.get(c) or D_CMDS[c], "cmd": c}
+            if lap_west:
+                res["west"] = lap_west
+            if lap_east:
+                res["east"] = lap_east
+            return res
+
     for c in (*V_CMDS, *D_CMDS):
         pat = re.compile(
             r"^(?:\{\}[\^_]\{(?P<pre>.*)\})?\\" + c +
@@ -170,6 +225,8 @@ def classify_cell(cell: str) -> dict:
 
     if bare in ("=", "\\simeq", "\\cong"):
         return {"k": "h", "dir": "~", "cmd": bare.lstrip("\\") or "="}
+    if bare in ("\\|", "\\Vert", "\\parallel"):  # vertical identity edge
+        return {"k": "v", "dir": "veq", "cmd": "="}
 
     # Object text sharing a cell with a trailing/leading arrow ("\times_d c
     # \rightrightarrows"): split, spilling the text into the neighbour.
@@ -183,6 +240,11 @@ def classify_cell(cell: str) -> dict:
             if not any(x in H_CMDS or x in V_CMDS or x in D_CMDS
                        for x in CMD_RE.findall(tex)):
                 return {"k": "h", "dir": H_CMDS[cmd], "cmd": cmd, spill: tex}
+
+    # A parenthesized formula is an object even if it mentions arrows
+    # inside: "(L(c) \\overset{f}{\\to} d)" is a morphism-as-object.
+    if spanning_parens(s):
+        return {"k": "o", "tex": s}
 
     # An arrow command mixed into anything else -> too clever for now.
     if any(c in H_CMDS or c in V_CMDS or c in D_CMDS for c in cmds):
@@ -254,7 +316,8 @@ def parse(mathml: str) -> tuple[str, list | None]:
     if not found:
         return "no-array", None
     start, end, body = found
-    if tex[:start].strip() or tex[end:].strip():
+    trailing = re.sub(r"\\[,;:!]|\\q?quad|[\s.,]", "", tex[end:])
+    if tex[:start].strip() or trailing:
         return "wrapped", None
     grid = [[classify_cell(c) for c in split_depth0(row, ("&",))]
             for row in split_depth0(body, ("\\\\",))]

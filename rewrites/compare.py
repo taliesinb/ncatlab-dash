@@ -16,8 +16,14 @@ ROW = """
  <td class="num"><a href="#r{n}">{n}</a></td>
  <td class="meta">{name}<br /><code>{hash}</code><br />{cls}</td>
  <td><img src="mathml/{hash}.png" /></td>
- <td><img src="typst/{hash}.png" /></td>
+ <td>{right}</td>
 </tr>"""
+
+
+def right_cell(cls: str, hash_: str) -> str:
+    if cls.startswith(("EXCLUDED", "NOT CONVERTED")):
+        return f'<em>{cls}</em>'
+    return f'<img src="typst/{hash_}.png" />'
 
 PAGE = """<!DOCTYPE html>
 <html><head><meta charset="utf-8" />
@@ -67,7 +73,8 @@ def main() -> None:
         out = common.OUT / args.out
         out.write_text(PAGE.format(n=len(rows), rows="".join(
             ROW.format(n=i + 1, hash=r["hash"], name=r["name"],
-                       cls=r["class"])
+                       cls=r["class"],
+                       right=right_cell(r["class"], r["hash"]))
             for i, r in enumerate(rows))), encoding="utf-8")
         print(f"{len(rows)} rows -> {out}")
         con.close()
@@ -93,7 +100,8 @@ def main() -> None:
         out = common.OUT / args.out
         out.write_text(PAGE.format(n=len(rows), rows="".join(
             ROW.format(n=i + 1, hash=r["hash"], name=r["name"],
-                       cls=r["class"])
+                       cls=r["class"],
+                       right=right_cell(r["class"], r["hash"]))
             for i, r in enumerate(rows))), encoding="utf-8")
         print(f"{len(rows)} pairs -> {out}")
         con.close()
@@ -113,7 +121,8 @@ def main() -> None:
     rows = con.execute(sql, (args.sample,)).fetchall()
     out = common.OUT / args.out
     out.write_text(PAGE.format(n=len(rows), rows="".join(
-        ROW.format(n=i + 1, hash=r["hash"], name=r["name"], cls=r["class"])
+        ROW.format(n=i + 1, hash=r["hash"], name=r["name"], cls=r["class"],
+                   right=right_cell(r["class"], r["hash"]))
         for i, r in enumerate(rows))), encoding="utf-8")
     print(f"{len(rows)} pairs -> {out}")
     con.close()

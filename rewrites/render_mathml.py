@@ -98,10 +98,10 @@ def main() -> None:
                               capture_output=True, text=True)
         status = "ok" if proc.returncode == 0 and png.is_file() else "error"
         con.execute(
-            "INSERT OR REPLACE INTO renders VALUES (?,?,?,?,?)",
+            "INSERT OR REPLACE INTO renders VALUES (?,?,?,?,?,?)",
             (h, "mathml", status,
              f"out/mathml/{h}.png" if status == "ok" else None,
-             proc.stderr.strip()[:500] if status == "error" else ""))
+             proc.stderr.strip()[:500] if status == "error" else "", None))
         ok += status == "ok"
         err += status != "ok"
         if (ok + err) % 50 == 0:
