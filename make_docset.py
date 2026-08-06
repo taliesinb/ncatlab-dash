@@ -244,7 +244,7 @@ def replace_diagrams(text: str, diagrams: Path) -> tuple[str, int]:
     def sub(m: re.Match) -> str:
         nonlocal n
         xml = m.group(0)
-        if "<mtable" not in xml or not (set(xml) & DIAGRAM_ARROWS):
+        if not (set(xml) & DIAGRAM_ARROWS):
             return xml
         h = hashlib.sha1(xml.encode("utf-8")).hexdigest()[:16]
         svg_file = diagrams / f"{h}.svg"

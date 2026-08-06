@@ -44,6 +44,10 @@ D_ARROWS = set("↘↙↗↖⇘⇙⇗⇖")
 ALL_ARROWS = H_ARROWS | V_ARROWS | D_ARROWS
 
 MATH_RE = re.compile(r'<math [^>]*display="block"[^>]*>.*?</math>', re.S)
+# Stacked-arrow adjunction notation outside any mtable
+# (\stackrel{\stackrel{x^*}{\leftarrow}}{\stackrel{x_*}{\to}}), which
+# MathML renders with the top arrow floating detached.
+STACKED_RE = re.compile(r"\\stackrel\s*\{\s*\\stackrel|\\underoverset")
 
 
 def cell_kind(text: str) -> str:
@@ -118,8 +122,10 @@ def main() -> None:
     if not (args.html / "pages").is_dir():
         sys.exit(f"error: {args.html} is not a nlab-content-html checkout")
 
-    args.db.unlink(missing_ok=True)
     con = sqlite3.connect(args.db)
+    # Re-extraction rebuilds only this table; downstream stage tables
+    # (parsed/typst/renders) are caches keyed by hash and must survive.
+    con.execute("DROP TABLE IF EXISTS mtables")
     con.execute("""
         CREATE TABLE mtables(
             id INTEGER PRIMARY KEY,
@@ -146,7 +152,9 @@ def main() -> None:
         page_name = None
         for m in MATH_RE.finditer(text):
             xml = m.group(0)
-            if "<mtable" not in xml or not (set(xml) & ALL_ARROWS):
+            if not (set(xml) & ALL_ARROWS):
+                continue
+            if "<mtable" not in xml and not STACKED_RE.search(xml):
                 continue
             if page_name is None:
                 page_name = name_file.read_text(encoding="utf-8").strip()

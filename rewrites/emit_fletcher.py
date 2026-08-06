@@ -58,6 +58,41 @@ CIRCLED = {"bigotimes": "⨂", "bigoplus": "⨁", "bigodot": "⨀",
 CIRCLED_RE = re.compile(r"\\(%s)\b" % "|".join(CIRCLED))
 
 
+STACK_LONG = {"to": "longrightarrow", "rightarrow": "longrightarrow",
+              "leftarrow": "longleftarrow", "mapsto": "longmapsto"}
+
+
+def translate_stacked_pairs(tex: str) -> str:
+    """\\stackrel{\\stackrel{A}{ar1}}{\\stackrel{B}{ar2}} — the adjoint-pair
+    notation — becomes the classic display: A over a long ar1, stacked on
+    ar2 with B under it."""
+    while True:
+        m = re.search(r"\\stackrel\s*\{\s*\\stackrel\s*", tex)
+        if not m:
+            return tex
+        a, rest = parse_arrays.read_group(tex[m.end():])
+        ar1, rest = parse_arrays.read_group(rest)
+        rest = rest.lstrip()
+        if not rest.startswith("}"):
+            return tex
+        inner, rest2 = parse_arrays.read_group(rest[1:])
+        m2 = re.match(r"\\stackrel\s*", inner)
+        if not m2:
+            return tex
+        b, r = parse_arrays.read_group(inner[m2.end():])
+        ar2, r = parse_arrays.read_group(r)
+        if r.strip():
+            return tex
+
+        def longen(ar):
+            cmd = ar.strip().lstrip("\\")
+            return "\\" + STACK_LONG.get(cmd, cmd)
+
+        tex = (tex[:m.start()]
+               + "\\underset{\\underset{%s}{%s}}{\\overset{%s}{%s}}"
+               % (b, longen(ar2), a, longen(ar1)) + rest2)
+
+
 def translate_underoverset(tex: str) -> str:
     """itex \\underoverset{below}{above}{base} -> nested over/underset."""
     while "\\underoverset" in tex:
@@ -71,6 +106,7 @@ def translate_underoverset(tex: str) -> str:
 
 
 def fix_tex(tex: str) -> str:
+    tex = translate_stacked_pairs(tex)
     tex = translate_underoverset(tex)
     tex = CIRCLED_RE.sub(lambda m: CIRCLED[m.group(1)], tex)
     for pat, rep in TEX_FIXUPS:
