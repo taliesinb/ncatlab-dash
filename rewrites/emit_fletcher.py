@@ -72,10 +72,11 @@ ARROW_DIR = {"to": "r", "rightarrow": "r", "longrightarrow": "r",
              "leftarrow": "l", "longleftarrow": "l"}
 
 
-def translate_stacked_pairs(tex: str) -> str:
+def translate_stacked_pairs(tex: str, stash: list) -> str:
     """\\stackrel{\\stackrel{A}{ar1}}{\\stackrel{B}{ar2}} — the adjoint-pair
     notation — becomes the classic display: A over a long ar1, stacked on
-    ar2 with B under it."""
+    ar2 with B under it. The replacement is stashed behind a placeholder
+    so translate_labeled_arrows doesn't rewrite its insides."""
     while True:
         m = re.search(r"\\stackrel\s*\{\s*\\stackrel\s*", tex)
         if not m:
@@ -94,20 +95,45 @@ def translate_stacked_pairs(tex: str) -> str:
         if r.strip():
             return tex
 
-        d1 = ARROW_DIR.get(ar1.strip().lstrip("\\"))
-        d2 = ARROW_DIR.get(ar2.strip().lstrip("\\"))
-        glyph = PAIR_GLYPH.get((d1, d2))
-        if glyph:
-            repl = "\\overset{%s}{\\underset{%s}{%s}}" % (a, b, glyph)
+        def longen(ar):
+            cmd = ar.strip().lstrip("\\")
+            return "\\" + STACK_LONG.get(cmd, cmd)
+
+        # \displaystyle keeps the under slot from dropping to script size,
+        # so both arrows and labels come out equal and full-length.
+        repl = ("\\underset{\\displaystyle\\underset{%s}{%s}}"
+                "{\\displaystyle\\overset{%s}{%s}}"
+                % (b, longen(ar2), a, longen(ar1)))
+        stash.append(repl)
+        tex = tex[:m.start()] + f"\x01{len(stash) - 1}\x01" + rest2
+
+
+LARROW_R = {"to", "rightarrow", "longrightarrow"}
+LARROW_L = {"leftarrow", "longleftarrow"}
+LABELED_ARROW_RE = re.compile(r"\\(stackrel|overset|underset)\s*")
+
+
+def translate_labeled_arrows(tex: str) -> str:
+    """\\stackrel{X}{\\to} -> \\xrightarrow{X}: the extensible arrow
+    stretches to fit its label, which matters in script contexts
+    (colim_{\\hat A \\to A}) where a stacked label ends up unreadably
+    cramped over a 1em arrow."""
+    pos = 0
+    while True:
+        m = LABELED_ARROW_RE.search(tex, pos)
+        if not m:
+            return tex
+        label, rest = parse_arrays.read_group(tex[m.end():])
+        arrow, rest2 = parse_arrays.read_group(rest)
+        cmd = arrow.strip().lstrip("\\")
+        if arrow.strip() == "\\" + cmd and cmd in (LARROW_R | LARROW_L):
+            base = "\\xrightarrow" if cmd in LARROW_R else "\\xleftarrow"
+            repl = (f"{base}[{label}]{{}}" if m.group(1) == "underset"
+                    else f"{base}{{{label}}}")
+            tex = tex[:m.start()] + repl + rest2
+            pos = m.start() + len(repl)
         else:
-
-            def longen(ar):
-                cmd = ar.strip().lstrip("\\")
-                return "\\" + STACK_LONG.get(cmd, cmd)
-
-            repl = ("\\underset{\\underset{%s}{%s}}{\\overset{%s}{%s}}"
-                    % (b, longen(ar2), a, longen(ar1)))
-        tex = tex[:m.start()] + repl + rest2
+            pos = m.end()
 
 
 def translate_underoverset(tex: str) -> str:
@@ -123,8 +149,12 @@ def translate_underoverset(tex: str) -> str:
 
 
 def fix_tex(tex: str) -> str:
-    tex = translate_stacked_pairs(tex)
+    pair_stash: list[str] = []
+    tex = translate_stacked_pairs(tex, pair_stash)
     tex = translate_underoverset(tex)
+    tex = translate_labeled_arrows(tex)
+    tex = re.sub(r"\x01(\d+)\x01",
+                 lambda m: pair_stash[int(m.group(1))], tex)
     tex = CIRCLED_RE.sub(lambda m: CIRCLED[m.group(1)], tex)
     for pat, rep in TEX_FIXUPS:
         tex = pat.sub(rep, tex)
@@ -474,6 +504,13 @@ def emit(grid) -> tuple[str, str | None]:
             else:
                 args.append(f"label: text(0.75em, mi({ts(label)}))")
             args.append(f"label-side: {label_side(cell['dir'], placement)}")
+            if cell["k"] == "d" and max(
+                    abs(cmap[a[1]] - cmap[b[1]]),
+                    abs(rmap[a[0]] - rmap[b[0]])) >= 2:
+                # Long diagonals: keep the label near the source end and
+                # close to the line instead of floating at midspan.
+                args.append("label-pos: 0.3")
+                args.append("label-sep: 0.15em")
             second = next((p for p in ("above", "below", "east", "west")
                            if p != placement and cell.get(p)), None)
         if cell.get("cmd") in ("rightrightarrows", "leftleftarrows"):
