@@ -126,35 +126,53 @@ def translate_labeled_arrows(tex: str) -> str:
         label, rest = parse_arrays.read_group(tex[m.end():])
         arrow, rest2 = parse_arrays.read_group(rest)
         cmd = arrow.strip().lstrip("\\")
-        if arrow.strip() == "\\" + cmd and cmd in (LARROW_R | LARROW_L):
+        # mitex has no optional-argument \xrightarrow[below]{}, so only
+        # above-labelled forms convert.
+        if (arrow.strip() == "\\" + cmd and cmd in (LARROW_R | LARROW_L)
+                and m.group(1) != "underset"):
             base = "\\xrightarrow" if cmd in LARROW_R else "\\xleftarrow"
-            repl = (f"{base}[{label}]{{}}" if m.group(1) == "underset"
-                    else f"{base}{{{label}}}")
+            repl = f"{base}{{{label}}}"
             tex = tex[:m.start()] + repl + rest2
             pos = m.start() + len(repl)
         else:
             pos = m.end()
 
 
-def translate_underoverset(tex: str) -> str:
-    """itex \\underoverset{below}{above}{base} -> nested over/underset."""
+def translate_underoverset(tex: str, stash: list) -> str:
+    """itex \\underoverset{below}{above}{base} -> nested over/underset.
+    When above and below are themselves arrows (an adjoint pair around a
+    \\bot or an empty base), force display style so neither arrow drops to
+    script size, and stash the result out of later passes' reach."""
     while "\\underoverset" in tex:
         i = tex.find("\\underoverset")
         below, rest = parse_arrays.read_group(tex[i + len("\\underoverset"):])
         above, rest = parse_arrays.read_group(rest)
         base, rest = parse_arrays.read_group(rest)
-        tex = (tex[:i] + "\\overset{%s}{\\underset{%s}{%s}}"
-               % (above, below, base) + rest)
+        arrowish = re.compile(r"\\(long)?(left|right)arrow|\\to\b")
+        if arrowish.search(above) and arrowish.search(below):
+            repl = ("\\underset{\\displaystyle %s}"
+                    "{\\overset{\\displaystyle %s}{%s}}"
+                    % (below, above, base.strip() or "\\;"))
+            stash.append(repl)
+            repl = f"\x01{len(stash) - 1}\x01"
+        else:
+            repl = "\\overset{%s}{\\underset{%s}{%s}}" % (above, below, base)
+        tex = tex[:i] + repl + rest
     return tex
 
 
 def fix_tex(tex: str) -> str:
     pair_stash: list[str] = []
     tex = translate_stacked_pairs(tex, pair_stash)
-    tex = translate_underoverset(tex)
+    tex = translate_underoverset(tex, pair_stash)
     tex = translate_labeled_arrows(tex)
     tex = re.sub(r"\x01(\d+)\x01",
                  lambda m: pair_stash[int(m.group(1))], tex)
+    # itex's projective/injective limit spelling renders badly via mitex.
+    tex = re.sub(r"\{?\\lim_\{?\\leftarrow\}?\}?",
+                 r"\\underset{\\longleftarrow}{\\lim}{}", tex)
+    tex = re.sub(r"\{?\\lim_\{?\\(?:to|rightarrow)\}?\}?",
+                 r"\\underset{\\longrightarrow}{\\lim}{}", tex)
     tex = CIRCLED_RE.sub(lambda m: CIRCLED[m.group(1)], tex)
     for pat, rep in TEX_FIXUPS:
         tex = pat.sub(rep, tex)
@@ -362,11 +380,12 @@ def emit(grid) -> tuple[str, str | None]:
         under its source (fall back straight up/down), or run it long-range
         across the grid (fall back to nearest object in the quadrant)."""
         dr, dc = STEPS[direction]
+        # Strict diagonal first; otherwise nearest object (Chebyshev) in
+        # the quadrant — which includes straight above/below, and picks
+        # the author's true endpoint when the slope doesn't match.
         a = (nearest_object(grid, r, c, -dr, -dc)
-             or nearest_object(grid, r, c, -1, 0)
              or quadrant_object(r, c, -dr, -dc))
         b = (nearest_object(grid, r, c, dr, dc)
-             or nearest_object(grid, r, c, 1, 0)
              or quadrant_object(r, c, dr, dc))
         return a, b
 
@@ -457,14 +476,15 @@ def emit(grid) -> tuple[str, str | None]:
                           else (right, left))
                 mark = HOOK.get(sub.get("cmd", ""), MARKS[sub["dir"]])
                 args = [coord(aa), coord(bb), f'"{mark}"']
-                placement = next(
-                    (p for p in ("above", "below") if sub.get(p)), None)
-                if placement:
-                    args.append(
-                        f"label: text(0.75em, mi({ts(sub[placement])}))")
-                    args.append(
-                        f"label-side: {label_side(sub['dir'], placement)}")
-                up = 2.5 if sub["dir"] != "l" else -2.5
+                label = sub.get("above") or sub.get("below")
+                if label:
+                    # Labels go by stack position: the top arrow's label
+                    # above the pair, the bottom arrow's below it.
+                    want = "above" if i == 0 else "below"
+                    args.append(f"label: text(0.75em, mi({ts(label)}))")
+                    args.append(f"label-side: {label_side(sub['dir'], want)}")
+                    args.append("label-sep: 0.35em")
+                up = 3 if sub["dir"] != "l" else -3
                 args.append(f"shift: {up if i == 0 else -up}pt")
                 lines.append(f"  edge({', '.join(args)}),")
             continue
@@ -503,6 +523,7 @@ def emit(grid) -> tuple[str, str | None]:
                 args.append("label-sep: 0.25em")
             else:
                 args.append(f"label: text(0.75em, mi({ts(label)}))")
+                args.append("label-sep: 0.1em")
             args.append(f"label-side: {label_side(cell['dir'], placement)}")
             if cell["k"] == "d" and max(
                     abs(cmap[a[1]] - cmap[b[1]]),
@@ -510,7 +531,6 @@ def emit(grid) -> tuple[str, str | None]:
                 # Long diagonals: keep the label near the source end and
                 # close to the line instead of floating at midspan.
                 args.append("label-pos: 0.3")
-                args.append("label-sep: 0.15em")
             second = next((p for p in ("above", "below", "east", "west")
                            if p != placement and cell.get(p)), None)
         if cell.get("cmd") in ("rightrightarrows", "leftleftarrows"):
@@ -526,6 +546,7 @@ def emit(grid) -> tuple[str, str | None]:
             lines.append(
                 f"  edge({coord(a)}, {coord(b)}, \"-\", stroke: none,"
                 f" label: text(0.75em, mi({ts(cell[second])})),"
+                f" label-sep: 0.1em,"
                 f" label-side: {label_side(cell['dir'], second)}),")
 
     return "ok", ("#diagram(\n  spacing: (2.6em, 2.2em),\n"
