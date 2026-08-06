@@ -110,7 +110,50 @@ def nearest_object(grid, r, c, dr, dc):
     return None
 
 
+def arrow_tex(cell) -> str:
+    """Rebuild a horizontal arrow cell's TeX from its parsed parts."""
+    base = "=" if cell["dir"] == "~" and cell.get("cmd") == "=" else \
+        "\\" + cell.get("cmd", "to")
+    if cell.get("above"):
+        base = "\\overset{%s}{%s}" % (cell["above"], base)
+    if cell.get("below"):
+        base = "\\underset{%s}{%s}" % (cell["below"], base)
+    return base
+
+
+def signature_rows(grid):
+    """Detect the function-signature pattern: two or more rows, each
+    exactly `LHS & horizontal-arrow & RHS` (f : A -> B over x |-> f(x)).
+    With no vertical structure there is nothing to commute — it is an
+    aligned table, not a diagram."""
+    rows = []
+    for row in grid:
+        filled = [cell for cell in row if cell["k"] != "e"]
+        if (len(filled) == 3 and filled[0]["k"] == "o"
+                and filled[1]["k"] == "h" and filled[2]["k"] == "o"):
+            rows.append(filled)
+        else:
+            return None
+    return rows if len(rows) >= 2 else None
+
+
+def emit_signature(rows) -> str:
+    cells = []
+    for lhs, arrow, rhs in rows:
+        cells.append(f"  mi({ts('\\displaystyle ' + lhs['tex'])}),")
+        cells.append(f"  mi({ts(arrow_tex(arrow))}),")
+        cells.append(f"  mi({ts('\\displaystyle ' + rhs['tex'])}),")
+    return (PREAMBLE
+            + "#grid(\n  columns: 3, column-gutter: 0.4em,"
+            " row-gutter: 1.1em,\n"
+            "  align: (right + horizon, center + horizon, left + horizon),\n"
+            + "\n".join(cells) + "\n)\n")
+
+
 def emit(grid) -> tuple[str, str | None]:
+    sig = signature_rows(grid)
+    if sig:
+        return "ok", emit_signature(sig)
     objects = {(r, c): cell for r, row in enumerate(grid)
                for c, cell in enumerate(row) if cell["k"] == "o"}
     if not objects:
@@ -221,6 +264,8 @@ def emit(grid) -> tuple[str, str | None]:
 
 
 def classify(grid) -> str:
+    if signature_rows(grid):
+        return "signature"
     kinds = ["".join(c["k"] if c["k"] != "e" else " " for c in row)
              for row in grid]
     flat = "".join(kinds)

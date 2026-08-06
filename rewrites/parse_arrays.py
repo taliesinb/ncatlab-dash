@@ -45,6 +45,10 @@ D_CMDS = {"searrow": "se", "swarrow": "sw", "nearrow": "ne", "nwarrow": "nw",
 CMD_RE = re.compile(r"\\([a-zA-Z]+)")
 # \stackrel{lbl}{arrow} / \overset{lbl}{arrow} / \underset{lbl}{arrow}
 OVER_RE = re.compile(r"\\(stackrel|overset|underset|underoverset)\s*")
+# amsmath extensible arrows: \xrightarrow[below]{above}
+X_RE = re.compile(r"^\\x(rightarrow|leftarrow|hookrightarrow|hookleftarrow"
+                  r"|twoheadrightarrow|mapsto|to)\s*")
+X_CMD = {"to": "rightarrow"}
 
 
 def find_array(tex: str):
@@ -148,6 +152,25 @@ def classify_cell(cell: str) -> dict:
     if not s:
         return {"k": "e"}
     s = re.sub(r"\\[bB]igg?\b", "", s).strip()  # \big etc. are cosmetic
+
+    # \xrightarrow[below]{above} and friends
+    m = X_RE.match(s)
+    if m:
+        cmd = X_CMD.get(m.group(1), m.group(1))
+        rest = s[m.end():].lstrip()
+        below = None
+        if rest.startswith("["):
+            close = rest.find("]")
+            if close > 0:
+                below, rest = rest[1:close], rest[close + 1:]
+        above, rest = read_group(rest)
+        if not rest.strip():
+            res = {"k": "h", "dir": H_CMDS[cmd], "cmd": cmd}
+            if above.strip():
+                res["above"] = above.strip()
+            if below and below.strip():
+                res["below"] = below.strip()
+            return res
 
     # \stackrel{f}{\to} and friends
     m = OVER_RE.match(s)
@@ -292,6 +315,10 @@ def merge_annotations(grid) -> None:
                 continue
             other = grid[r][cc]
             if other["k"] in ("v", "d"):
+                if any(cell["k"] == "h" for cell in grid[r]):
+                    # A horizontal arrow in this row may need this object
+                    # as an endpoint; don't swallow it as a label.
+                    continue
                 other.setdefault("west" if dc == 1 else "east", tex)
             elif other["k"] == "o":
                 other["tex"] = (f"{tex} {other['tex']}" if dc == 1
