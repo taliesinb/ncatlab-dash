@@ -12,7 +12,8 @@ import argparse
 import common
 
 ROW = """
-<tr>
+<tr id="r{n}">
+ <td class="num"><a href="#r{n}">{n}</a></td>
  <td class="meta">{name}<br /><code>{hash}</code><br />{cls}</td>
  <td><img src="mathml/{hash}.png" /></td>
  <td><img src="typst/{hash}.png" /></td>
@@ -26,11 +27,12 @@ PAGE = """<!DOCTYPE html>
  table {{ border-collapse: collapse; }}
  td {{ border: 1px solid #ccc; padding: 8px; vertical-align: middle; }}
  td.meta {{ font-size: 11px; color: #555; max-width: 16em; }}
+ td.num {{ font-size: 18px; font-weight: bold; }}
  img {{ max-width: 480px; }}
  th {{ padding: 8px; background: #eee; }}
 </style></head><body>
 <h1>{n} sampled diagrams: WebKit MathML (left) vs typst+fletcher (right)</h1>
-<table><tr><th>page</th><th>original</th><th>regenerated</th></tr>
+<table><tr><th>#</th><th>page</th><th>original</th><th>regenerated</th></tr>
 {rows}
 </table></body></html>
 """
@@ -58,8 +60,8 @@ def main() -> None:
     rows = con.execute(sql, (args.sample,)).fetchall()
     out = common.OUT / "compare.html"
     out.write_text(PAGE.format(n=len(rows), rows="".join(
-        ROW.format(hash=r["hash"], name=r["name"], cls=r["class"])
-        for r in rows)), encoding="utf-8")
+        ROW.format(n=i + 1, hash=r["hash"], name=r["name"], cls=r["class"])
+        for i, r in enumerate(rows))), encoding="utf-8")
     print(f"{len(rows)} pairs -> {out}")
     con.close()
 
