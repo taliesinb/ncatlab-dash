@@ -62,14 +62,41 @@ def load_names(html_mirror: Path) -> dict[str, str]:
 
 
 REDIRECT_RE = re.compile(r"\[\[!redirects\s+([^\]]+?)\s*\]\]")
+CATEGORY_RE = re.compile(r"^category\s*:\s*(.+?)\s*$", re.M)
 
 
-def load_redirects(source_mirror: Path, names: dict[str, str]) -> dict[str, str]:
-    """Map redirect alias -> page id, from [[!redirects ...]] in page sources."""
+def classify(name: str, categories: set[str]) -> str | None:
+    """Dash entry type for a page, or None to leave it out of the index.
+
+    Grounded in the nLab's own conventions: `category:` tags in the page
+    sources (people, reference, ...) and page-name conventions (floating
+    tables of contents, expository series, archived history subpages).
+    "Person" is not an official Dash type but Dash handles unknown types
+    gracefully (generic icon, groups under the literal type name).
+    """
+    if name.endswith(" > history"):
+        return None
+    if name.endswith("contents"):
+        return "Category"
+    if name.startswith(("geometry of physics", "Introduction to ")):
+        return "Guide"
+    if "people" in categories:
+        return "Person"
+    if "reference" in categories:
+        return "Resource"
+    return "Entry"
+
+
+def scan_sources(
+    source_mirror: Path, names: dict[str, str]
+) -> tuple[dict[str, str], dict[str, set[str]]]:
+    """Scan the Markdown sources for [[!redirects ...]] directives
+    (alias -> page id) and `category:` tags (page id -> tags)."""
     redirects: dict[str, str] = {}
+    categories: dict[str, set[str]] = {}
     if not (source_mirror / "pages").is_dir():
-        print("note: no source mirror; skipping redirect aliases")
-        return redirects
+        print("note: no source mirror; skipping redirects and categories")
+        return redirects, categories
     for page_id, page_dir in iter_pages(source_mirror):
         md = page_dir / "content.md"
         if not md.is_file():
@@ -82,7 +109,10 @@ def load_redirects(source_mirror: Path, names: dict[str, str]) -> dict[str, str]
             alias = alias.strip()
             if alias and alias not in names:
                 redirects.setdefault(alias, page_id)
-    return redirects
+        for line in CATEGORY_RE.findall(text):
+            categories.setdefault(page_id, set()).update(
+                tag.strip() for tag in line.split(","))
+    return redirects, categories
 
 
 TITLE_RE = re.compile(r"<title>\s*(.*?)\s+in nLab\s*</title>", re.S)
@@ -172,9 +202,10 @@ def main() -> None:
     print("scanning page names ...")
     names = load_names(args.html)
     print(f"{len(names)} pages")
-    print("harvesting redirects ...")
-    redirects = load_redirects(args.source, names)
-    print(f"{len(redirects)} redirect aliases")
+    print("harvesting redirects and categories ...")
+    redirects, categories = scan_sources(args.source, names)
+    print(f"{len(redirects)} redirect aliases, "
+          f"{len(categories)} pages with category tags")
 
     included: set[str] | None = None
     if args.only:
@@ -239,12 +270,24 @@ def main() -> None:
             print(f"  {written} pages")
     print(f"{written} pages written")
 
-    entries = [(name, "Entry", f"pages/{pid}.html")
-               for name, pid in names.items()
-               if included is None or pid in included]
-    entries += [(alias, "Entry", f"pages/{pid}.html")
-                for alias, pid in redirects.items()
-                if included is None or pid in included]
+    # Canonical pages under their own name; redirect aliases searchable under
+    # the alias but annotated Wikipedia-style as "-> canonical" via Dash's
+    # dash_entry_menuDescription path metadata.
+    types: dict[str, str | None] = {}
+    entries = []
+    for name, pid in names.items():
+        types[pid] = typ = classify(name, categories.get(pid, set()))
+        if typ and (included is None or pid in included):
+            entries.append((name, typ, f"pages/{pid}.html"))
+    canonical = {pid: name for name, pid in names.items()}
+    for alias, pid in redirects.items():
+        typ = types.get(pid)
+        if not typ or (included is not None and pid not in included):
+            continue
+        target = canonical.get(pid, "").replace("<", "").replace(">", "")
+        entries.append((
+            alias, typ,
+            f"<dash_entry_menuDescription=→ {target}>pages/{pid}.html"))
     n = build_index(docset / "Contents" / "Resources" / "docSet.dsidx", entries)
     print(f"indexed {n} entries")
 
