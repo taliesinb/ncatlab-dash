@@ -51,6 +51,7 @@ def main() -> None:
     ap.add_argument("--limit", type=int)
     ap.add_argument("--sample", type=int,
                     help="random sample of N (seeded, deterministic)")
+    ap.add_argument("--hashes", help="file of hashes to render")
     args = ap.parse_args()
 
     assets = (common.HERE.parent / "build" / "assets").resolve()
@@ -64,7 +65,12 @@ def main() -> None:
     common.renders_table(con)
     binary = snap_binary()
 
-    if args.all:
+    if args.hashes:
+        wanted = set(open(args.hashes).read().split())
+        rows = [r for r in con.execute(
+            "SELECT hash, mathml FROM mtables GROUP BY hash")
+            if r["hash"] in wanted]
+    elif args.all:
         rows = con.execute(
             "SELECT hash, mathml FROM mtables GROUP BY hash").fetchall()
     else:

@@ -99,16 +99,9 @@ def emit(grid) -> tuple[str, str | None]:
                for c, cell in enumerate(row) if cell["k"] == "o"}
     if not objects:
         return "empty", None
-    # Compress away rows/columns that hold no objects.
-    rmap = {r: i for i, r in enumerate(sorted({r for r, _ in objects}))}
-    cmap = {c: i for i, c in enumerate(sorted({c for _, c in objects}))}
 
-    def coord(rc):
-        return f"({cmap[rc[1]]}, {rmap[rc[0]]})"
-
-    lines = [f"  node({coord(rc)}, mi({ts(cell['tex'])})),"
-             for rc, cell in sorted(objects.items())]
-
+    # Resolve every arrow to its endpoint objects first.
+    edges = []
     for r, row in enumerate(grid):
         for c, cell in enumerate(row):
             k = cell["k"]
@@ -130,23 +123,60 @@ def emit(grid) -> tuple[str, str | None]:
                 b = nearest_object(grid, r, c, dr, dc)
             if a is None or b is None:
                 return "dangling", None
+            edges.append((a, b, cell))
 
-            mark = HOOK.get(cell.get("cmd", ""), MARKS[cell["dir"]])
-            args = [coord(a), coord(b), f'"{mark}"']
-            placement = next((p for p in ("above", "below", "east", "west")
-                              if cell.get(p)), None)
-            if cell["dir"] == "~":
-                sym = TILDE_LABEL.get(cell.get("cmd", "="), "=")
-                args.append(f"label: mi({ts(sym)})")
-            elif placement:
-                args.append(f"label: mi({ts(cell[placement])})")
-                args.append(f"label-side: {label_side(cell['dir'], placement)}")
-            if cell.get("cmd") in ("rightrightarrows", "leftleftarrows"):
-                lines.append(f"  edge({', '.join(args)}, shift: 2pt),")
-                args = [a for a in args if not a.startswith("label")]
-                lines.append(f"  edge({', '.join(args)}, shift: -2pt),")
-                continue
-            lines.append(f"  edge({', '.join(args)}),")
+    # An object no arrow touches, sitting right next to one that is an
+    # endpoint, is an annotation ("c \in" before "[X, A_s]"): merge it.
+    endpoints = {rc for a, b, _ in edges for rc in (a, b)}
+    for rc in sorted(set(objects) - endpoints):
+        r, c = rc
+        for dc in (1, -1):
+            nb = (r, c + dc)
+            if nb in objects and nb in endpoints:
+                tex, other = objects[rc]["tex"], objects[nb]["tex"]
+                objects[nb]["tex"] = (f"{tex} {other}" if dc == 1
+                                      else f"{other} {tex}")
+                del objects[rc]
+                break
+
+    # Compress away rows/columns that hold no objects.
+    rmap = {r: i for i, r in enumerate(sorted({r for r, _ in objects}))}
+    cmap = {c: i for i, c in enumerate(sorted({c for _, c in objects}))}
+
+    def coord(rc):
+        return f"({cmap[rc[1]]}, {rmap[rc[0]]})"
+
+    lines = [f"  node({coord(rc)}, mi({ts(cell['tex'])})),"
+             for rc, cell in sorted(objects.items())]
+
+    max_x = max(cmap.values())
+    for a, b, cell in edges:
+        mark = HOOK.get(cell.get("cmd", ""), MARKS[cell["dir"]])
+        args = [coord(a), coord(b), f'"{mark}"']
+        placement = next((p for p in ("above", "below", "east", "west")
+                          if cell.get(p)), None)
+        # Vertical arrows on the diagram's flanks read best with the label
+        # pushed outward, whatever side the author's script habit chose.
+        if (cell["k"] == "v" and placement in ("east", "west")
+                and not (cell.get("east") and cell.get("west"))):
+            x = cmap[a[1]]
+            outward = ("west" if x * 2 < max_x else
+                       "east" if x * 2 > max_x else placement)
+            if outward != placement:
+                cell[outward] = cell.pop(placement)
+                placement = outward
+        if cell["dir"] == "~":
+            sym = TILDE_LABEL.get(cell.get("cmd", "="), "=")
+            args.append(f"label: mi({ts(sym)})")
+        elif placement:
+            args.append(f"label: mi({ts(cell[placement])})")
+            args.append(f"label-side: {label_side(cell['dir'], placement)}")
+        if cell.get("cmd") in ("rightrightarrows", "leftleftarrows"):
+            lines.append(f"  edge({', '.join(args)}, shift: 2pt),")
+            args = [a for a in args if not a.startswith("label")]
+            lines.append(f"  edge({', '.join(args)}, shift: -2pt),")
+            continue
+        lines.append(f"  edge({', '.join(args)}),")
 
     code = (PREAMBLE + "#diagram(\n  spacing: (2.6em, 2.2em),\n"
             + "\n".join(lines) + "\n)\n")

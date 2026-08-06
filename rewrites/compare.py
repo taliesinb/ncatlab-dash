@@ -44,9 +44,34 @@ def main() -> None:
     ap.add_argument("--class", dest="cls", help="restrict to one class")
     ap.add_argument("--hashes", help="file of hashes: fixed sample, "
                     "in file order (keeps row numbers stable)")
+    ap.add_argument("--pages", help="comma-separated page names: ALL of "
+                    "their diagrams, converted or not")
+    ap.add_argument("--out", default="compare.html")
     args = ap.parse_args()
 
     con = common.connect()
+    if args.pages:
+        names = [n.strip() for n in args.pages.split(",")]
+        rows = []
+        for name in names:
+            for r in con.execute(
+                    "SELECT DISTINCT m.hash hash, m.page_name name,"
+                    " coalesce(t.class, 'NOT CONVERTED ('"
+                    "   || coalesce(p.status, '?') || ')') class"
+                    " FROM mtables m"
+                    " LEFT JOIN typst t ON t.hash = m.hash AND"
+                    "   t.status='ok'"
+                    " LEFT JOIN parsed p ON p.hash = m.hash"
+                    " WHERE m.page_name = ? ORDER BY m.seq", (name,)):
+                rows.append(r)
+        out = common.OUT / args.out
+        out.write_text(PAGE.format(n=len(rows), rows="".join(
+            ROW.format(n=i + 1, hash=r["hash"], name=r["name"],
+                       cls=r["class"])
+            for i, r in enumerate(rows))), encoding="utf-8")
+        print(f"{len(rows)} rows -> {out}")
+        con.close()
+        return
     if args.hashes:
         wanted = open(args.hashes).read().split()
         rows = []
@@ -55,9 +80,17 @@ def main() -> None:
                 "SELECT t.hash hash, t.class class,"
                 " (SELECT page_name FROM mtables m WHERE m.hash=t.hash) name"
                 " FROM typst t WHERE t.hash=?", (h,)).fetchone()
-            if r:
-                rows.append(r)
-        out = common.OUT / "compare.html"
+            if not r:  # dropped from the convertible set; keep the row
+                status = con.execute(
+                    "SELECT status FROM parsed WHERE hash=?",
+                    (h,)).fetchone()
+                r = {"hash": h,
+                     "class": f"EXCLUDED ({status[0] if status else '?'})",
+                     "name": con.execute(
+                         "SELECT page_name FROM mtables WHERE hash=?",
+                         (h,)).fetchone()[0]}
+            rows.append(r)
+        out = common.OUT / args.out
         out.write_text(PAGE.format(n=len(rows), rows="".join(
             ROW.format(n=i + 1, hash=r["hash"], name=r["name"],
                        cls=r["class"])
@@ -78,7 +111,7 @@ def main() -> None:
         sql += f" WHERE t.class = '{args.cls}'"
     sql += " ORDER BY t.hash LIMIT ?"
     rows = con.execute(sql, (args.sample,)).fetchall()
-    out = common.OUT / "compare.html"
+    out = common.OUT / args.out
     out.write_text(PAGE.format(n=len(rows), rows="".join(
         ROW.format(n=i + 1, hash=r["hash"], name=r["name"], cls=r["class"])
         for i, r in enumerate(rows))), encoding="utf-8")

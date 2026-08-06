@@ -171,10 +171,42 @@ def classify_cell(cell: str) -> dict:
     if bare in ("=", "\\simeq", "\\cong"):
         return {"k": "h", "dir": "~", "cmd": bare.lstrip("\\") or "="}
 
+    # Object text sharing a cell with a trailing/leading arrow ("\times_d c
+    # \rightrightarrows"): split, spilling the text into the neighbour.
+    alts = "|".join(sorted(H_CMDS, key=len, reverse=True))
+    for pat, spill in ((rf"^(.*\S)\s*\\({alts})$", "spill_west"),
+                       (rf"^\\({alts})\s+(\S.*)$", "spill_east")):
+        m = re.match(pat, s, re.S)
+        if m:
+            tex, cmd = ((m.group(1), m.group(2)) if spill == "spill_west"
+                        else (m.group(2), m.group(1)))
+            if not any(x in H_CMDS or x in V_CMDS or x in D_CMDS
+                       for x in CMD_RE.findall(tex)):
+                return {"k": "h", "dir": H_CMDS[cmd], "cmd": cmd, spill: tex}
+
     # An arrow command mixed into anything else -> too clever for now.
     if any(c in H_CMDS or c in V_CMDS or c in D_CMDS for c in cmds):
         return {"k": "?", "tex": s}
     return {"k": "o", "tex": s}
+
+
+def absorb_spills(grid) -> None:
+    """Attach spilled object text from split cells to the nearest object
+    in the spill direction; if there is none, the cell is unconvertible."""
+    for r, row in enumerate(grid):
+        for c, cell in enumerate(row):
+            for key, dc in (("spill_west", -1), ("spill_east", 1)):
+                tex = cell.pop(key, None)
+                if tex is None:
+                    continue
+                cc = c + dc
+                while 0 <= cc < len(row) and row[cc]["k"] == "e":
+                    cc += dc
+                if 0 <= cc < len(row) and row[cc]["k"] == "o":
+                    row[cc]["tex"] = (f"{row[cc]['tex']} {tex}" if dc < 0
+                                      else f"{tex} {row[cc]['tex']}")
+                else:
+                    grid[r][c] = {"k": "?", "tex": tex}
 
 
 def merge_annotations(grid) -> None:
@@ -213,6 +245,11 @@ def parse(mathml: str) -> tuple[str, list | None]:
     if not m:
         return "no-annotation", None
     tex = html.unescape(m.group(1))
+    # Annotations are sometimes double-escaped, leaving numeric character
+    # references (&#643;) in the TeX; decode them to the actual character.
+    tex = re.sub(r"&#(\d+);", lambda m: chr(int(m.group(1))), tex)
+    tex = re.sub(r"&#x([0-9a-fA-F]+);", lambda m: chr(int(m.group(1), 16)),
+                 tex)
     found = find_array(tex)
     if not found:
         return "no-array", None
@@ -224,6 +261,7 @@ def parse(mathml: str) -> tuple[str, list | None]:
     grid = [r for r in grid if any(c["k"] != "e" for c in r)]
     if not grid:
         return "empty", None
+    absorb_spills(grid)
     merge_annotations(grid)
     unknown = sum(c["k"] == "?" for r in grid for c in r)
     return ("ok" if not unknown else f"cells:{unknown}?"), grid
