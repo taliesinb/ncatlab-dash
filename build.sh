@@ -50,10 +50,17 @@ fetch_asset javascripts/prototype.js
 fetch_asset javascripts/page_helper.js
 fetch_asset javascripts/thm_numbering.js
 
+# Regenerated diagrams (rewrites/ pipeline), if they have been built.
+DIAGRAMS=""
+if [[ -d "$ROOT/rewrites/out/svg" ]]; then
+    DIAGRAMS="--diagrams $ROOT/rewrites/out/svg"
+fi
+
 python3 "$ROOT/make_docset.py" \
     --html "$BUILD/nlab-content-html" \
     --source "$BUILD/nlab-content" \
     --assets "$BUILD/assets" \
-    --out "$ROOT/dist"
+    --out "$ROOT/dist" \
+    $DIAGRAMS
 
 echo "Docset written to $ROOT/dist/nLab.docset"
