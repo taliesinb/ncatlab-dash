@@ -178,6 +178,25 @@ def emit_signature(rows) -> str:
             + "\n".join(cells) + "\n)\n")
 
 
+def emit_table(grid) -> str:
+    """An arrow-free \\array as a centered typst grid (itex's default
+    column alignment), e.g. tables of equations or data."""
+    cols = max(len(r) for r in grid)
+    cells = []
+    for row in grid:
+        padded = row + [{"k": "e"}] * (cols - len(row))
+        for cell in padded:
+            if cell["k"] == "o":
+                cells.append(
+                    f"  mi({ts('\\displaystyle ' + cell['tex'])}),")
+            else:
+                cells.append("  [],")
+    return (PREAMBLE
+            + f"#grid(\n  columns: {cols}, column-gutter: 1.4em,"
+            " row-gutter: 1em,\n  align: center + horizon,\n"
+            + "\n".join(cells) + "\n)\n")
+
+
 def emit(grid) -> tuple[str, str | None]:
     sig = signature_rows(grid)
     if sig:
@@ -217,9 +236,10 @@ def emit(grid) -> tuple[str, str | None]:
             edges.append((a, b, cell))
 
     if not edges:
-        # No arrows at all: an alignment table (often swept in by \vec's
-        # combining arrow glyph), which the original MathML renders fine.
-        return "no-edges", None
+        # No arrows at all (often swept in by \vec's combining-arrow
+        # glyph): an ordinary table of equations, emitted as an aligned
+        # grid rather than a diagram.
+        return "ok", emit_table(grid)
 
     # An object no arrow touches, sitting right next to one that is an
     # endpoint, is an annotation ("c \in" before "[X, A_s]"): merge it.
@@ -294,6 +314,8 @@ def emit(grid) -> tuple[str, str | None]:
 def classify(grid) -> str:
     if signature_rows(grid):
         return "signature"
+    if not any(c["k"] in ("h", "v", "d") for row in grid for c in row):
+        return "table"
     kinds = ["".join(c["k"] if c["k"] != "e" else " " for c in row)
              for row in grid]
     flat = "".join(kinds)
