@@ -28,8 +28,9 @@ TEX_FIXUPS = [
     (re.compile(r"\\r?lap\s*"), ""),
     (re.compile(r"\\phantom\s*\{[^{}]*\}"), ""),
     (re.compile(r"\\hspace\s*\{[^{}]*\}"), r"\\;"),
-    # itex sets | as an ordinary symbol; mitex spaces it as a relation.
-    (re.compile(r"(?<![\\{])\|"), r"{\\mid}"),
+    # itex sets | as an ordinary symbol; mitex spaces it as a relation —
+    # except a restriction bar |_c, whose subscript renders fine raw.
+    (re.compile(r"(?<![\\{])\|(?!_)"), r"{\\mid}"),
     (re.compile(r"\\mathscr\b"), r"\\mathcal"),  # mitex lacks \mathscr
     # typst math italicizes sans; \textsf gives the upright sans words
     # the nLab uses for category names.
@@ -271,6 +272,26 @@ def emit(grid) -> tuple[str, str | None]:
 
     max_x = max(cmap.values())
     for a, b, cell in edges:
+        if cell.get("pair"):
+            # Two stacked arrows (\stackrel{arrow}{arrow}), e.g. an
+            # adjunction pair: draw both, shifted apart vertically.
+            left, right = (b, a) if cell["dir"] == "l" else (a, b)
+            for i, sub in enumerate(cell["pair"]):
+                aa, bb = ((left, right) if sub["dir"] in ("r", "lr", "~")
+                          else (right, left))
+                mark = HOOK.get(sub.get("cmd", ""), MARKS[sub["dir"]])
+                args = [coord(aa), coord(bb), f'"{mark}"']
+                placement = next(
+                    (p for p in ("above", "below") if sub.get(p)), None)
+                if placement:
+                    args.append(
+                        f"label: text(0.75em, mi({ts(sub[placement])}))")
+                    args.append(
+                        f"label-side: {label_side(sub['dir'], placement)}")
+                up = 2.5 if sub["dir"] != "l" else -2.5
+                args.append(f"shift: {up if i == 0 else -up}pt")
+                lines.append(f"  edge({', '.join(args)}),")
+            continue
         mark = HOOK.get(cell.get("cmd", ""), MARKS[cell["dir"]])
         args = [coord(a), coord(b), f'"{mark}"']
         placement = next((p for p in ("above", "below", "east", "west")
