@@ -54,7 +54,10 @@ PROTECTED_RE = re.compile(
 # operators; the raw unicode characters pass through fine.
 CIRCLED = {"bigotimes": "⨂", "bigoplus": "⨁", "bigodot": "⨀",
            "otimes": "⊗", "oplus": "⊕", "ominus": "⊖", "odot": "⊙",
-           "oslash": "⊘", "circledast": "⊛", "circledcirc": "⊚"}
+           "oslash": "⊘", "circledast": "⊛", "circledcirc": "⊚",
+           # mitex emits typst's pre-0.13 names (sect) for these
+           "cap": "∩", "cup": "∪", "bigcap": "⋂", "bigcup": "⋃",
+           "setminus": "∖"}
 CIRCLED_RE = re.compile(r"\\(%s)\b" % "|".join(CIRCLED))
 
 
@@ -295,15 +298,32 @@ def emit(grid) -> tuple[str, str | None]:
     if not objects:
         return "empty", None
 
+    def quadrant_object(r, c, dr, dc):
+        """Nearest object in the quadrant the vector (dr, dc) points into
+        (Chebyshev distance), for long-range diagonals whose slope doesn't
+        match the grid."""
+        best = None
+        for (rr, cc) in objects:
+            if dr * (rr - r) < 0 or dc * (cc - c) < 0 or (rr, cc) == (r, c):
+                continue
+            if rr == r and cc == c:
+                continue
+            d = max(abs(rr - r), abs(cc - c))
+            if best is None or d < best[0]:
+                best = (d, (rr, cc))
+        return best[1] if best else None
+
     def resolve_diagonal(r, c, direction):
         """Endpoints of a diagonal arrow; authors often place the cell
-        under its source, so a failed diagonal scan falls back to the
-        object straight above/below."""
+        under its source (fall back straight up/down), or run it long-range
+        across the grid (fall back to nearest object in the quadrant)."""
         dr, dc = STEPS[direction]
-        a = nearest_object(grid, r, c, -dr, -dc) \
-            or nearest_object(grid, r, c, -1, 0)
-        b = nearest_object(grid, r, c, dr, dc) \
-            or nearest_object(grid, r, c, 1, 0)
+        a = (nearest_object(grid, r, c, -dr, -dc)
+             or nearest_object(grid, r, c, -1, 0)
+             or quadrant_object(r, c, -dr, -dc))
+        b = (nearest_object(grid, r, c, dr, dc)
+             or nearest_object(grid, r, c, 1, 0)
+             or quadrant_object(r, c, dr, dc))
         return a, b
 
     # Resolve every arrow to its endpoint objects first.
@@ -418,6 +438,7 @@ def emit(grid) -> tuple[str, str | None]:
             if outward != placement:
                 cell[outward] = cell.pop(placement)
                 placement = outward
+        second = None
         if cell["dir"] == "~":
             if cell.get("cmd") == "=":
                 args[2] = '"="'  # double-line equality edge
@@ -432,12 +453,22 @@ def emit(grid) -> tuple[str, str | None]:
         elif placement:
             args.append(f"label: text(0.75em, mi({ts(cell[placement])}))")
             args.append(f"label-side: {label_side(cell['dir'], placement)}")
+            second = next((p for p in ("above", "below", "east", "west")
+                           if p != placement and cell.get(p)), None)
         if cell.get("cmd") in ("rightrightarrows", "leftleftarrows"):
             lines.append(f"  edge({', '.join(args)}, shift: 2pt),")
             args = [a for a in args if not a.startswith("label")]
             lines.append(f"  edge({', '.join(args)}, shift: -2pt),")
             continue
         lines.append(f"  edge({', '.join(args)}),")
+        if second:
+            # An arrow labelled on both sides ({}^{p_1}\downarrow^{\in F}):
+            # fletcher edges carry one label, so a stroke-less ghost edge
+            # carries the other.
+            lines.append(
+                f"  edge({coord(a)}, {coord(b)}, \"-\", stroke: none,"
+                f" label: text(0.75em, mi({ts(cell[second])})),"
+                f" label-side: {label_side(cell['dir'], second)}),")
 
     return "ok", ("#diagram(\n  spacing: (2.6em, 2.2em),\n"
                   + "\n".join(lines) + "\n)\n")
@@ -496,6 +527,10 @@ def main() -> None:
     # as mitex equations with arrays as matrices.
     diag_re = re.compile(r"\\[sn][ew][aA]rrow")
     spacing_re = re.compile(r"^(\\qquad|\\quad|\\;|\\,|\\!|[\s.,])*$")
+    # Inner gaps may also be a relation joining two diagrams (array = array)
+    sep_re = re.compile(r"^(\\qquad|\\quad|\\;|\\,|\\!|[\s.,])*"
+                        r"(=|\\simeq|\\cong)?"
+                        r"(\\qquad|\\quad|\\;|\\,|\\!|[\s.,])*$")
     for row in common.pending(
             con,
             "SELECT p.hash hash, min(m.mathml) mathml FROM parsed p"
@@ -525,17 +560,23 @@ def main() -> None:
                     + [tex[spans[i][1]:spans[i + 1][0]]
                        for i in range(len(spans) - 1)]
                     + [tex[spans[-1][1]:]])
-            if all(spacing_re.match(g) for g in gaps):
+            inner = [sep_re.match(g) for g in gaps[1:-1]]
+            if (spacing_re.match(gaps[0]) and spacing_re.match(gaps[-1])
+                    and all(inner)):
                 grids = [parse_wrapped_grid(b) for _, _, b in spans]
                 if all(g is not None for g in grids):
                     results = [emit(g) for g in grids]
                     if all(st == "ok" for st, _ in results):
-                        bodies = ",\n".join(
-                            f"  [{b.strip()}]" for _, b in results)
+                        cells = [f"  [{results[0][1].strip()}],"]
+                        for m2, (_, b) in zip(inner, results[1:]):
+                            sep = m2.group(2)
+                            if sep:
+                                cells.append(f"  mi({ts(sep)}),")
+                            cells.append(f"  [{b.strip()}],")
                         code = (PREAMBLE
-                                + f"#grid(columns: {len(results)},"
-                                " column-gutter: 3em, align: horizon,\n"
-                                + bodies + "\n)\n")
+                                + f"#grid(columns: {len(cells)},"
+                                " column-gutter: 2em, align: horizon,\n"
+                                + "\n".join(cells) + "\n)\n")
                         cls = (classify(grids[0]) if len(grids) == 1
                                else "multi-diagram")
         if code is None:
