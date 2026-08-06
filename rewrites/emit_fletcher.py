@@ -64,6 +64,12 @@ CIRCLED_RE = re.compile(r"\\(%s)\b" % "|".join(CIRCLED))
 
 STACK_LONG = {"to": "longrightarrow", "rightarrow": "longrightarrow",
               "leftarrow": "longleftarrow", "mapsto": "longmapsto"}
+# Paired-arrow glyph by (top, bottom) direction: keeps both arrows and
+# both labels the same size, unlike an under/overset stack.
+PAIR_GLYPH = {("l", "r"): "\\leftrightarrows", ("r", "l"): "\\rightleftarrows",
+              ("r", "r"): "\\rightrightarrows", ("l", "l"): "\\leftleftarrows"}
+ARROW_DIR = {"to": "r", "rightarrow": "r", "longrightarrow": "r",
+             "leftarrow": "l", "longleftarrow": "l"}
 
 
 def translate_stacked_pairs(tex: str) -> str:
@@ -88,13 +94,20 @@ def translate_stacked_pairs(tex: str) -> str:
         if r.strip():
             return tex
 
-        def longen(ar):
-            cmd = ar.strip().lstrip("\\")
-            return "\\" + STACK_LONG.get(cmd, cmd)
+        d1 = ARROW_DIR.get(ar1.strip().lstrip("\\"))
+        d2 = ARROW_DIR.get(ar2.strip().lstrip("\\"))
+        glyph = PAIR_GLYPH.get((d1, d2))
+        if glyph:
+            repl = "\\overset{%s}{\\underset{%s}{%s}}" % (a, b, glyph)
+        else:
 
-        tex = (tex[:m.start()]
-               + "\\underset{\\underset{%s}{%s}}{\\overset{%s}{%s}}"
-               % (b, longen(ar2), a, longen(ar1)) + rest2)
+            def longen(ar):
+                cmd = ar.strip().lstrip("\\")
+                return "\\" + STACK_LONG.get(cmd, cmd)
+
+            repl = ("\\underset{\\underset{%s}{%s}}{\\overset{%s}{%s}}"
+                    % (b, longen(ar2), a, longen(ar1)))
+        tex = tex[:m.start()] + repl + rest2
 
 
 def translate_underoverset(tex: str) -> str:
@@ -452,7 +465,14 @@ def emit(grid) -> tuple[str, str | None]:
                 sym = TILDE_LABEL.get(cell.get("cmd", ""), "=")
                 args.append(f"label: text(0.75em, mi({ts(sym)}))")
         elif placement:
-            args.append(f"label: text(0.75em, mi({ts(cell[placement])}))")
+            label = cell[placement]
+            if label.strip() in ("\\simeq", "\\cong", "=", "\\approx"):
+                # A bare relation squished against the edge reads as a
+                # second line; render it bigger and further out.
+                args.append(f"label: text(0.9em, mi({ts(label)}))")
+                args.append("label-sep: 0.25em")
+            else:
+                args.append(f"label: text(0.75em, mi({ts(label)}))")
             args.append(f"label-side: {label_side(cell['dir'], placement)}")
             second = next((p for p in ("above", "below", "east", "west")
                            if p != placement and cell.get(p)), None)

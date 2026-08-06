@@ -227,7 +227,8 @@ def classify_cell(cell: str) -> dict:
             # adjunction's F/U arrows stacked).
             if which == "stackrel":
                 top, bottom = classify_cell(label), classify_cell(arrow)
-                if top["k"] == "h" and bottom["k"] == "h":
+                if (top["k"] == "h" and bottom["k"] == "h"
+                        and top["dir"] != "~" and bottom["dir"] != "~"):
                     return {"k": "h", "dir": top["dir"],
                             "pair": [top, bottom]}
             if arrow.strip() in ("=", "\\simeq", "\\cong"):
