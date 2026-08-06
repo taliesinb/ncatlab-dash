@@ -33,6 +33,7 @@ TEX_FIXUPS = [
     # itex sets | as an ordinary symbol; mitex spaces it as a relation —
     # except a restriction bar |_c, whose subscript renders fine raw.
     (re.compile(r"(?<![\\{])\|(?!_)"), r"{\\mid}"),
+    (re.compile(r"\\n\b"), "n"),  # upstream typo: \Delta^\n for \Delta^n
     (re.compile(r"\\mathscr\b"), r"\\mathcal"),  # mitex lacks \mathscr
     # typst math italicizes sans; \textsf gives the upright sans words
     # the nLab uses for category names.

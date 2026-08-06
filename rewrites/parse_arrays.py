@@ -167,7 +167,10 @@ def parse_vd_cell(s: str) -> dict | None:
     follows an east label, with lap/script/brace wrappers stripped."""
     top_cmds = CMD_RE.findall(depth0_text(s))
     vd = [c for c in top_cmds if c in V_CMDS or c in D_CMDS]
-    if len(vd) != 1 or any(c in H_CMDS for c in top_cmds):
+    # simeq/cong script an arrow as a label ({}^\simeq\downarrow), they
+    # don't make the cell horizontal.
+    if len(vd) != 1 or any(c in H_CMDS and H_CMDS[c] != "~"
+                           for c in top_cmds):
         return None
     c = vd[0]
     i = s.find("\\" + c)
