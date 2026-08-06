@@ -76,6 +76,7 @@ SINGULAR_RULES = [("sses", "ss"), ("ies", "y"), ("ices", "ex"),
 def norm_key(name: str) -> str:
     """Case-, dash-, whitespace-, and infinity-symbol-insensitive form."""
     key = name.replace("∞", "infinity")
+    key = key.replace("/'", "'").replace("\\'", "'")  # escaped-quote residue
     key = DASH_RUN_RE.sub("-", key)
     return re.sub(r"\s+", " ", key).strip().lower().lstrip("+*# ")
 
@@ -97,15 +98,33 @@ def person_tokens(name: str) -> list[str]:
     return norm_key(re.sub(r"[.,]", " ", name)).split()
 
 
-def person_alias_redundant(alias: str, canonical_name: str) -> bool:
-    """People aliases nobody would type into Dash: names in non-Latin
-    scripts, and initials-variants that add no word beyond the canonical
-    name ('A A Markov Jr' for 'Andrey Markov Jr'). Transliteration variants
-    ('A Souslin' for 'Andrei Suslin') introduce a new word and survive."""
-    if any(c.isalpha() and ord(c) > 0x24F for c in alias):
+def edit_distance_le_1(a: str, b: str) -> bool:
+    if abs(len(a) - len(b)) > 1:
+        return False
+    i = 0
+    while i < min(len(a), len(b)) and a[i] == b[i]:
+        i += 1
+    if len(a) == len(b):
+        return a[i + 1:] == b[i + 1:]
+    if len(a) < len(b):
+        a, b = b, a
+    return a[i + 1:] == b[i:]
+
+
+def person_token_known(token: str, known: set[str]) -> bool:
+    """A name word adds nothing if it is a bare initial, already known, or
+    a one-letter transliteration wobble of a known word ('andrej'/'andrey',
+    'andreievich'/'andreevich'). The shared-prefix requirement keeps real
+    variant surnames distinct ('souslin' vs 'suslin'), and non-ASCII words
+    are never folded ('poincaré' vs 'poincare' stays searchable)."""
+    if len(token) == 1 or token in known:
         return True
-    known = set(person_tokens(canonical_name))
-    return all(len(t) == 1 or t in known for t in person_tokens(alias))
+    if not token.isascii() or len(token) < 5:
+        return False
+    return any(
+        k.isascii() and len(k) >= 5 and token[:4] == k[:4]
+        and edit_distance_le_1(token, k)
+        for k in known)
 
 
 def trim_aliases(canonical_name: str, aliases: list[str],
@@ -124,10 +143,21 @@ def trim_aliases(canonical_name: str, aliases: list[str],
 
     kept = []
     seen = name_variants(canonical_name)
+    known = set(person_tokens(canonical_name))
+    pseen = {" ".join(person_tokens(canonical_name))}
     for alias in sorted(
             aliases, key=lambda a: (not a.isascii(), inflected(a), len(a), a)):
-        if person and person_alias_redundant(alias, canonical_name):
-            continue
+        if person:
+            if any(c.isalpha() and ord(c) > 0x24F for c in alias):
+                continue  # non-Latin script; nobody types this into Dash
+            tokens = person_tokens(alias)
+            pkey = " ".join(tokens)
+            if pkey in pseen:
+                continue  # punctuation/initial-style variant of a kept name
+            if all(person_token_known(t, known) for t in tokens):
+                continue  # only initials and (near-)known words
+            pseen.add(pkey)
+            known.update(tokens)
         variants = name_variants(alias)
         if variants & seen:
             continue
