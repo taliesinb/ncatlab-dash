@@ -50,7 +50,29 @@ PROTECTED_RE = re.compile(
     r"|operatorname|mathcal|mathfrak|mathscr|mathbb|begin|end)\s*\{[^{}]*\}")
 
 
+# mitex 0.2.6 emits symbol modifiers typst 0.15 removed for the circled
+# operators; the raw unicode characters pass through fine.
+CIRCLED = {"bigotimes": "⨂", "bigoplus": "⨁", "bigodot": "⨀",
+           "otimes": "⊗", "oplus": "⊕", "ominus": "⊖", "odot": "⊙",
+           "oslash": "⊘", "circledast": "⊛", "circledcirc": "⊚"}
+CIRCLED_RE = re.compile(r"\\(%s)\b" % "|".join(CIRCLED))
+
+
+def translate_underoverset(tex: str) -> str:
+    """itex \\underoverset{below}{above}{base} -> nested over/underset."""
+    while "\\underoverset" in tex:
+        i = tex.find("\\underoverset")
+        below, rest = parse_arrays.read_group(tex[i + len("\\underoverset"):])
+        above, rest = parse_arrays.read_group(rest)
+        base, rest = parse_arrays.read_group(rest)
+        tex = (tex[:i] + "\\overset{%s}{\\underset{%s}{%s}}"
+               % (above, below, base) + rest)
+    return tex
+
+
 def fix_tex(tex: str) -> str:
+    tex = translate_underoverset(tex)
+    tex = CIRCLED_RE.sub(lambda m: CIRCLED[m.group(1)], tex)
     for pat, rep in TEX_FIXUPS:
         tex = pat.sub(rep, tex)
     saved: list[str] = []
@@ -174,8 +196,7 @@ def emit_signature(rows) -> str:
         cells.append(f"  mi({ts('\\displaystyle ' + lhs['tex'])}),")
         cells.append(f"  {sig_arrow(arrow)},")
         cells.append(f"  mi({ts('\\displaystyle ' + rhs['tex'])}),")
-    return (PREAMBLE
-            + "#grid(\n  columns: 3, column-gutter: 0.4em,"
+    return ("#grid(\n  columns: 3, column-gutter: 0.4em,"
             " row-gutter: 1.1em,\n"
             "  align: (right + horizon, center + horizon, left + horizon),\n"
             + "\n".join(cells) + "\n)\n")
@@ -194,10 +215,25 @@ def emit_table(grid) -> str:
                     f"  mi({ts('\\displaystyle ' + cell['tex'])}),")
             else:
                 cells.append("  [],")
-    return (PREAMBLE
-            + f"#grid(\n  columns: {cols}, column-gutter: 1.4em,"
+    return (f"#grid(\n  columns: {cols}, column-gutter: 1.4em,"
             " row-gutter: 1em,\n  align: center + horizon,\n"
             + "\n".join(cells) + "\n)\n")
+
+
+def parse_wrapped_grid(body: str):
+    """A wrapped array's body as a cell grid, or None if not cleanly
+    parseable as a diagram."""
+    grid = [[parse_arrays.classify_cell(c)
+             for c in parse_arrays.split_depth0(row, ("&",))]
+            for row in parse_arrays.split_depth0(body, ("\\\\",))]
+    grid = [r for r in grid if any(c["k"] != "e" for c in r)]
+    if not grid:
+        return None
+    parse_arrays.absorb_spills(grid)
+    parse_arrays.merge_annotations(grid)
+    if any(c["k"] == "?" for r in grid for c in r):
+        return None
+    return grid
 
 
 def emit_equation(tex: str) -> str:
@@ -211,7 +247,7 @@ def emit_equation(tex: str) -> str:
         start, end, body = found
         tex = (tex[:start] + "\\begin{matrix}" + body + "\\end{matrix}"
                + tex[end:])
-    return PREAMBLE + f"#mitex({ts(tex)})\n"
+    return f"#mitex({ts(tex)})\n"
 
 
 def emit(grid) -> tuple[str, str | None]:
@@ -223,11 +259,29 @@ def emit(grid) -> tuple[str, str | None]:
     if not objects:
         return "empty", None
 
+    def resolve_diagonal(r, c, direction):
+        """Endpoints of a diagonal arrow; authors often place the cell
+        under its source, so a failed diagonal scan falls back to the
+        object straight above/below."""
+        dr, dc = STEPS[direction]
+        a = nearest_object(grid, r, c, -dr, -dc) \
+            or nearest_object(grid, r, c, -1, 0)
+        b = nearest_object(grid, r, c, dr, dc) \
+            or nearest_object(grid, r, c, 1, 0)
+        return a, b
+
     # Resolve every arrow to its endpoint objects first.
     edges = []
     for r, row in enumerate(grid):
         for c, cell in enumerate(row):
             k = cell["k"]
+            if k == "dd":
+                for part in cell["parts"]:
+                    a, b = resolve_diagonal(r, c, part["dir"])
+                    if a is None or b is None:
+                        return "dangling", None
+                    edges.append((a, b, part))
+                continue
             if k not in ("h", "v", "d"):
                 continue
             if k == "h":
@@ -240,15 +294,21 @@ def emit(grid) -> tuple[str, str | None]:
                     a = nearest_object(grid, r, c, -1, 0)
                     b = nearest_object(grid, r, c, 1, 0)
             elif k == "v":
-                a = nearest_object(grid, r, c, -1, 0)
-                b = nearest_object(grid, r, c, 1, 0)
+                # Rows of different widths can leave a vertical arrow's
+                # endpoint one column off; fall back diagonally.
+                a = (nearest_object(grid, r, c, -1, 0)
+                     or nearest_object(grid, r, c, -1, -1)
+                     or nearest_object(grid, r, c, -1, 1))
+                b = (nearest_object(grid, r, c, 1, 0)
+                     or nearest_object(grid, r, c, 1, -1)
+                     or nearest_object(grid, r, c, 1, 1))
                 if cell["dir"] == "u":
                     a, b = b, a
             else:
-                dr, dc = STEPS[cell["dir"]]
-                a = nearest_object(grid, r, c, -dr, -dc)
-                b = nearest_object(grid, r, c, dr, dc)
+                a, b = resolve_diagonal(r, c, cell["dir"])
             if a is None or b is None:
+                if cell.get("cmd") in ("Downarrow", "Uparrow"):
+                    continue  # a 2-cell decoration between arrows; drop it
                 return "dangling", None
             edges.append((a, b, cell))
 
@@ -343,15 +403,14 @@ def emit(grid) -> tuple[str, str | None]:
             continue
         lines.append(f"  edge({', '.join(args)}),")
 
-    code = (PREAMBLE + "#diagram(\n  spacing: (2.6em, 2.2em),\n"
-            + "\n".join(lines) + "\n)\n")
-    return "ok", code
+    return "ok", ("#diagram(\n  spacing: (2.6em, 2.2em),\n"
+                  + "\n".join(lines) + "\n)\n")
 
 
 def classify(grid) -> str:
     if signature_rows(grid):
         return "signature"
-    if not any(c["k"] in ("h", "v", "d") for row in grid for c in row):
+    if not any(c["k"] in ("h", "v", "d", "dd") for row in grid for c in row):
         return "table"
     kinds = ["".join(c["k"] if c["k"] != "e" else " " for c in row)
              for row in grid]
@@ -384,16 +443,23 @@ def main() -> None:
             con, "SELECT hash, grid FROM parsed WHERE status='ok'",
             "typst", args.force):
         grid = json.loads(row["grid"])
-        status, code = emit(grid)
+        status, body = emit(grid)
         con.execute(
             "INSERT OR REPLACE INTO typst(hash, class, status, code)"
             " VALUES (?,?,?,?)",
-            (row["hash"], classify(grid), status, code))
+            (row["hash"], classify(grid), status,
+             PREAMBLE + body if body else None))
         n += 1
 
     # Formulas that only look like diagrams: aligned derivations
-    # (no-array) and arrays embedded in larger formulas (wrapped) render
-    # whole as mitex equations.
+    # (no-array) and arrays embedded in larger formulas (wrapped).
+    # Three cases: formulas that are JUST arrays separated by spacing
+    # render as side-by-side fletcher diagrams; formulas embedding
+    # genuinely 2D (diagonal) diagrams stay unconverted (matrix-izing
+    # them looks worse than the original MathML); the rest render whole
+    # as mitex equations with arrays as matrices.
+    diag_re = re.compile(r"\\[sn][ew][aA]rrow")
+    spacing_re = re.compile(r"^(\\qquad|\\quad|\\;|\\,|\\!|[\s.,])*$")
     for row in common.pending(
             con,
             "SELECT p.hash hash, min(m.mathml) mathml FROM parsed p"
@@ -407,10 +473,43 @@ def main() -> None:
         tex = re.sub(r"&#(\d+);", lambda m: chr(int(m.group(1))), tex)
         tex = re.sub(r"&#x([0-9a-fA-F]+);",
                      lambda m: chr(int(m.group(1), 16)), tex)
+
+        spans, pos = [], 0
+        while True:
+            found = parse_arrays.find_array(tex[pos:])
+            if not found:
+                break
+            start, end, body = found
+            spans.append((pos + start, pos + end, body))
+            pos += end
+
+        cls, status, code = "equation", "ok", None
+        if spans:
+            gaps = ([tex[:spans[0][0]]]
+                    + [tex[spans[i][1]:spans[i + 1][0]]
+                       for i in range(len(spans) - 1)]
+                    + [tex[spans[-1][1]:]])
+            if all(spacing_re.match(g) for g in gaps):
+                grids = [parse_wrapped_grid(b) for _, _, b in spans]
+                if all(g is not None for g in grids):
+                    results = [emit(g) for g in grids]
+                    if all(st == "ok" for st, _ in results):
+                        bodies = ",\n".join(
+                            f"  [{b.strip()}]" for _, b in results)
+                        code = (PREAMBLE
+                                + f"#grid(columns: {len(results)},"
+                                " column-gutter: 3em, align: horizon,\n"
+                                + bodies + "\n)\n")
+                        cls = (classify(grids[0]) if len(grids) == 1
+                               else "multi-diagram")
+        if code is None:
+            if any(diag_re.search(b) for _, _, b in spans):
+                cls, status = "wrapped-diagram", "wrapped-diagram"
+            else:
+                code = PREAMBLE + emit_equation(tex)
         con.execute(
             "INSERT OR REPLACE INTO typst(hash, class, status, code)"
-            " VALUES (?,?,?,?)",
-            (row["hash"], "equation", "ok", emit_equation(tex)))
+            " VALUES (?,?,?,?)", (row["hash"], cls, status, code))
         n += 1
     con.commit()
     print(f"emitted {n} new; totals by status / class:")

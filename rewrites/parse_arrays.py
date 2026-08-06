@@ -138,23 +138,45 @@ def depth0_text(s: str) -> str:
     return s
 
 
+def trim_label(frag: str) -> str:
+    """Strip script/brace wrappers from an arrow label without unbalancing
+    braces: {}^{\\alpha_{x,y}} -> \\alpha_{x,y}."""
+    frag = re.sub(r"\\math[lr]lap\b", "", frag).strip()
+    while frag:
+        if frag[0] in "^_":
+            frag = frag[1:].strip()
+        elif frag[0] == "{" and frag[-1] == "}":
+            depth = 0
+            spanning = True
+            for i, ch in enumerate(frag):
+                depth += (ch == "{") - (ch == "}")
+                if depth == 0 and i < len(frag) - 1:
+                    spanning = False
+                    break
+            if not spanning:
+                break
+            frag = frag[1:-1].strip()
+        else:
+            break
+    return frag
+
+
 def parse_vd_cell(s: str) -> dict | None:
     """Generic vertical/diagonal arrow cell: exactly one v/d command, no
     horizontal arrows; whatever text precedes it is a west label, whatever
     follows an east label, with lap/script/brace wrappers stripped."""
-    cmds = CMD_RE.findall(s)
-    vd = [c for c in cmds if c in V_CMDS or c in D_CMDS]
-    if len(vd) != 1 or any(c in H_CMDS for c in cmds):
+    top_cmds = CMD_RE.findall(depth0_text(s))
+    vd = [c for c in top_cmds if c in V_CMDS or c in D_CMDS]
+    if len(vd) != 1 or any(c in H_CMDS for c in top_cmds):
         return None
     c = vd[0]
     i = s.find("\\" + c)
     res = {"k": "v" if c in V_CMDS else "d",
            "dir": V_CMDS.get(c) or D_CMDS[c], "cmd": c}
     for frag, key in ((s[:i], "west"), (s[i + len(c) + 1:], "east")):
-        frag = re.sub(r"\\math[lr]lap\b", "", frag)
-        frag = frag.strip().strip("^_{} \n\t")
-        if frag.strip():
-            res[key] = frag.strip()
+        frag = trim_label(frag)
+        if frag:
+            res[key] = frag
     return res
 
 
@@ -253,6 +275,22 @@ def classify_cell(cell: str) -> dict:
     # inside: "(L(c) \\overset{f}{\\to} d)" is a morphism-as-object.
     if spanning_parens(s):
         return {"k": "o", "tex": s}
+
+    # Two diagonals converging/diverging in one cell: "f \searrow \swarrow g"
+    m = re.match(r"^(?P<pre>.*?)\\(?P<c1>[sn][ew])arrow"
+                 r"\s*\\(?P<c2>[sn][ew])arrow(?P<post>.*)$", s, re.S)
+    if m and m.group("c1") + "arrow" in D_CMDS \
+            and m.group("c2") + "arrow" in D_CMDS:
+        labels = [trim_label(m.group("pre")), trim_label(m.group("post"))]
+        if not any(CMD_RE.findall(depth0_text(x)) for x in labels):
+            parts = []
+            for c, key, lab in ((m.group("c1") + "arrow", "west", labels[0]),
+                                (m.group("c2") + "arrow", "east", labels[1])):
+                part = {"k": "d", "dir": D_CMDS[c], "cmd": c}
+                if lab:
+                    part[key] = lab
+                parts.append(part)
+            return {"k": "dd", "parts": parts}
 
     # Vertical/diagonal arrow with labels in any of the many spellings
     # (\alpha_x\downarrow, {}^{f}\downarrow, \downarrow{^\mathrlap{p}}...).
