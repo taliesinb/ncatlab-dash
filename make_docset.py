@@ -230,10 +230,12 @@ CDATA_RE = re.compile(r"<!--/\*-->|<!\[CDATA\[/?\*?>?<!--\*/"
                       r"|/\*\]\]>\*/-->|<!--//-->|<!\[CDATA\[//><!--"
                       r"|//--><!\]\]>")
 NAV_RE = re.compile(r'<div class="navigation( navfoot)?">.*?</div>', re.S)
+# The <img> keeps the original span wrapper: the svg's em-based size
+# resolves against the span's (smaller) font-size, not the h1's.
 LOGO_RE = re.compile(
-    r'<span style="float: left[^"]*">\s*<svg.*?</svg>\s*</span>', re.S)
-LOGO_IMG = ('<img src="../assets/logo.svg" alt="" style="float: left; '
-            'width: 1.872em; height: 1.8em; margin: 0.5em 0.25em -0.25em 0" />')
+    r'(<span style="float: left[^"]*">)\s*<svg.*?</svg>\s*(</span>)', re.S)
+LOGO_IMG = (r'\1<img src="../assets/logo.svg" alt="" '
+            r'style="width: 1.872em; height: 1.8em" />\2')
 TEX_ANNOTATION_RE = re.compile(
     r'<annotation encoding="application/x-tex">.*?</annotation>', re.S)
 SHOW_LINK_RE = re.compile(r'href="/nlab/show/([^"#]*)(#[^"]*)?"')
