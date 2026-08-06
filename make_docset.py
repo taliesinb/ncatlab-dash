@@ -64,6 +64,57 @@ def load_names(html_mirror: Path) -> dict[str, str]:
 REDIRECT_RE = re.compile(r"\[\[!redirects\s+([^\]]+?)\s*\]\]")
 CATEGORY_RE = re.compile(r"^category\s*:\s*(.+?)\s*$", re.M)
 
+DASH_RUN_RE = re.compile(r"[-‐‒–—―]+")
+# Suffix -> singular replacement, applied to a normalized name to generate
+# candidate base forms (topoi -> topos, categories -> category, spectra ->
+# spectrum, simplices -> simplex, bases -> basis, monoids -> monoid, ...).
+SINGULAR_RULES = [("sses", "ss"), ("ies", "y"), ("ices", "ex"),
+                  ("ices", "ix"), ("oi", "os"), ("a", "um"), ("a", "on"),
+                  ("es", "is"), ("es", ""), ("s", "")]
+
+
+def norm_key(name: str) -> str:
+    """Case-, dash-, whitespace-, and infinity-symbol-insensitive form."""
+    key = name.replace("∞", "infinity")
+    key = DASH_RUN_RE.sub("-", key)
+    return re.sub(r"\s+", " ", key).strip().lower()
+
+
+def name_variants(name: str) -> set[str]:
+    """Normalized forms under which a name is considered redundant: case,
+    dash style, whitespace, the infinity symbol, and plural inflections."""
+    key = norm_key(name)
+    variants = {key}
+    for suffix, singular in SINGULAR_RULES:
+        if key.endswith(suffix):
+            variants.add(key[: len(key) - len(suffix)] + singular)
+    return variants
+
+
+def trim_aliases(canonical_name: str, aliases: list[str]) -> list[str]:
+    """Drop aliases that are mere spelling variants (case, dashes, plurals)
+    of the canonical name or of an already-kept alias. All names here refer
+    to the same page, so a variant-collision is always a true redundancy.
+    ASCII, singular, shorter spellings are preferred as the kept
+    representative: an alias whose plural-reduced variants hit another
+    candidate's key is itself the inflected form, so it is processed after
+    the base form it reduces to."""
+    all_keys = {norm_key(canonical_name)} | {norm_key(a) for a in aliases}
+
+    def inflected(alias: str) -> bool:
+        return bool((name_variants(alias) - {norm_key(alias)}) & all_keys)
+
+    kept = []
+    seen = name_variants(canonical_name)
+    for alias in sorted(
+            aliases, key=lambda a: (not a.isascii(), inflected(a), len(a), a)):
+        variants = name_variants(alias)
+        if variants & seen:
+            continue
+        seen |= variants
+        kept.append(alias)
+    return kept
+
 
 def classify(name: str, categories: set[str]) -> str | None:
     """Dash entry type for a page, or None to leave it out of the index.
@@ -280,14 +331,24 @@ def main() -> None:
         if typ and (included is None or pid in included):
             entries.append((name, typ, f"pages/{pid}.html"))
     canonical = {pid: name for name, pid in names.items()}
+    by_page: dict[str, list[str]] = {}
     for alias, pid in redirects.items():
+        by_page.setdefault(pid, []).append(alias)
+    total_aliases = trimmed = 0
+    for pid, aliases in by_page.items():
         typ = types.get(pid)
         if not typ or (included is not None and pid not in included):
             continue
+        total_aliases += len(aliases)
+        kept = trim_aliases(canonical.get(pid, ""), aliases)
+        trimmed += len(aliases) - len(kept)
         target = canonical.get(pid, "").replace("<", "").replace(">", "")
-        entries.append((
-            alias, typ,
-            f"<dash_entry_menuDescription=→ {target}>pages/{pid}.html"))
+        for alias in kept:
+            entries.append((
+                alias, typ,
+                f"<dash_entry_menuDescription=→ {target}>pages/{pid}.html"))
+    print(f"aliases: {total_aliases - trimmed} kept, "
+          f"{trimmed} trimmed as spelling/plural variants")
     n = build_index(docset / "Contents" / "Resources" / "docSet.dsidx", entries)
     print(f"indexed {n} entries")
 
