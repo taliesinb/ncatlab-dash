@@ -34,7 +34,6 @@ from pathlib import Path
 # thm_numbering.js: its fixRunIn() creates the .theorem_label spans that
 # thm_numbering counts. It also shims MathML columnalign for WebKit.
 KEEP_SCRIPTS = ("prototype.js", "page_helper.js", "thm_numbering.js")
-DROP_SCRIPTS = ("effects.js", "dragdrop.js", "controls.js", "application.js")
 
 
 def iter_pages(mirror: Path):
@@ -89,6 +88,8 @@ def name_variants(name: str) -> set[str]:
     for suffix, singular in SINGULAR_RULES:
         if key.endswith(suffix):
             variants.add(key[: len(key) - len(suffix)] + singular)
+    # Hyphenation is not a meaningful distinction ("J-rule" vs "J rule").
+    variants |= {v.replace("-", " ") for v in variants}
     return variants
 
 
@@ -177,6 +178,10 @@ def classify(name: str, categories: set[str]) -> str | None:
     """
     if name.endswith(" > history"):
         return None
+    if "empty" in categories and re.fullmatch(r"empty ?\d+", name):
+        return None  # blanked/deleted placeholder pages
+    if "sandbox" in name.lower():
+        return None
     if name.endswith("contents"):
         return "Category"
     if name.startswith(("geometry of physics", "Introduction to ")):
@@ -216,32 +221,63 @@ def scan_sources(
     return redirects, categories
 
 
-TITLE_RE = re.compile(r"<title>\s*(.*?)\s+in nLab\s*</title>", re.S)
-CSS_LINK_RE = re.compile(r'<link href="/stylesheets/[^"]*"[^>]*>')
-FONT_LINK_RE = re.compile(r'<link[^>]*href="https://cdn\.jsdelivr\.net[^"]*"[^>]*/?>')
-SCRIPT_SRC_RE = re.compile(r'<script src="/javascripts/([^"?]+)[^"]*"[^>]*></script>\n?')
+TITLE_RE = re.compile(r"<title>\s*(.*?)(?:\s+in nLab)?\s*</title>", re.S)
+HEAD_RE = re.compile(r"<head>.*?</head>", re.S)
+STYLE_RE = re.compile(r"<style[^>]*>(.*?)</style>", re.S)
+INLINE_SCRIPT_RE = re.compile(
+    r'<script type="text/javascript">(.*?)</script>', re.S)
+CDATA_RE = re.compile(r"<!--/\*-->|<!\[CDATA\[/?\*?>?<!--\*/"
+                      r"|/\*\]\]>\*/-->|<!--//-->|<!\[CDATA\[//><!--"
+                      r"|//--><!\]\]>")
 NAV_RE = re.compile(r'<div class="navigation( navfoot)?">.*?</div>', re.S)
+LOGO_RE = re.compile(
+    r'<span style="float: left[^"]*">\s*<svg.*?</svg>\s*</span>', re.S)
+LOGO_IMG = ('<img src="../assets/logo.svg" alt="" style="float: left; '
+            'width: 1.872em; height: 1.8em; margin: 0.5em 0.25em -0.25em 0" />')
+TEX_ANNOTATION_RE = re.compile(
+    r'<annotation encoding="application/x-tex">.*?</annotation>', re.S)
 SHOW_LINK_RE = re.compile(r'href="/nlab/show/([^"#]*)(#[^"]*)?"')
 ABS_LINK_RE = re.compile(r'(href|src)="(/[^/"][^"]*)"')
 HEADING_RE = re.compile(r"<h([23])( [^>]*)?>(.*?)</h\1>", re.S)
 TAG_RE = re.compile(r"<[^>]+>")
 
 
+def extract_head_assets(text: str, assets_dir: Path) -> None:
+    """Every page ships the same several KB of inline styles and scripts in
+    its <head>; extract them once from a sample page into shared asset files
+    so the per-page head can be a few lines. (The text/x-mathjax-config
+    block is dropped: it only matters when MathML is unsupported and the
+    CDN MathJax fallback loads, which never happens offline in Dash.)"""
+    m = HEAD_RE.search(text)
+    if not m:
+        sys.exit("error: could not find <head> in sample page")
+    head = m.group(0)
+    css = "\n".join(CDATA_RE.sub("", s).strip() for s in STYLE_RE.findall(head))
+    (assets_dir / "nlab-head.css").write_text(css, encoding="utf-8")
+    js = "\n".join(CDATA_RE.sub("", s).strip()
+                   for s in INLINE_SCRIPT_RE.findall(head))
+    (assets_dir / "nlab-head.js").write_text(js, encoding="utf-8")
+
+
 def transform(text: str, resolve, css_links: str, js_links: str) -> str:
-    text = TITLE_RE.sub(lambda m: f"<title>{m.group(1)}</title>", text, count=1)
+    # Replace the whole boilerplate <head> (identical across pages except
+    # the title) with a minimal one referencing the shared assets.
+    m = TITLE_RE.search(text)
+    title = re.sub(r"\s+", " ", m.group(1)).strip() if m else "nLab"
+    new_head = (
+        "<head>\n"
+        f"<title>{title}</title>\n"
+        '<meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />\n'
+        '<meta name="viewport" content="width=device-width, initial-scale=1" />\n'
+        f"{css_links}\n{js_links}\n</head>")
+    text = HEAD_RE.sub(lambda _: new_head, text, count=1)
 
-    # Vendored stylesheets/scripts; drop wiki-app JS and the CDN webfont.
-    text, n = CSS_LINK_RE.subn(css_links, text, count=1)
-    if n:
-        text = CSS_LINK_RE.sub("", text)
-    text = FONT_LINK_RE.sub("", text)
+    # The nLab logo SVG is inlined into every page header; share it instead.
+    text = LOGO_RE.sub(LOGO_IMG, text, count=1)
 
-    def script(m):
-        if m.group(1) == KEEP_SCRIPTS[0]:
-            return js_links
-        return ""
-
-    text = SCRIPT_SRC_RE.sub(script, text)
+    # Hidden TeX source of every formula (used only by a double-click-to-
+    # view-TeX popup that Dash's web view cannot open anyway).
+    text = TEX_ANNOTATION_RE.sub("", text)
 
     # Strip the header nav (search form, edit links) and footer nav.
     text = NAV_RE.sub("", text)
@@ -345,14 +381,17 @@ def main() -> None:
         'div[style*="text-align: center"] > svg { zoom: 1.5; }\n',
         encoding="utf-8")
 
+    here = Path(__file__).resolve().parent
+    shutil.copy(here / "icons" / "logo.svg", documents / "assets" / "logo.svg")
+
     css_links = "\n".join(
         f'<link href="../assets/{f}" media="all" rel="stylesheet" '
         'type="text/css" />'
         for f in ("instiki.css", "mathematics.css", "syntax.css", "nlab.css",
-                  "nlab-dash.css"))
+                  "nlab-head.css", "nlab-dash.css"))
     js_links = "\n".join(
         f'<script src="../assets/{f}" type="text/javascript"></script>'
-        for f in KEEP_SCRIPTS)
+        for f in KEEP_SCRIPTS + ("nlab-head.js",))
 
     print("transforming pages ...")
     written = 0
@@ -363,6 +402,8 @@ def main() -> None:
         if not src.is_file():
             continue
         text = src.read_text(encoding="utf-8", errors="surrogateescape")
+        if written == 0:
+            extract_head_assets(text, documents / "assets")
         text = transform(text, resolve, css_links, js_links)
         (documents / "pages" / f"{page_id}.html").write_text(
             text, encoding="utf-8", errors="surrogateescape")
