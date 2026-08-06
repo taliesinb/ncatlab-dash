@@ -34,6 +34,7 @@ H_CMDS = {
     "twoheadrightarrow": "r", "rightharpoonup": "r",
     "leftarrow": "l", "longleftarrow": "l", "Leftarrow": "l",
     "hookleftarrow": "l", "twoheadleftarrow": "l",
+    "rightrightarrows": "r", "leftleftarrows": "l",
     "leftrightarrow": "lr", "simeq": "~", "cong": "~", "equiv": "~",
 }
 V_CMDS = {"downarrow": "d", "Downarrow": "d", "uparrow": "u", "Uparrow": "u"}
@@ -41,7 +42,7 @@ D_CMDS = {"searrow": "se", "swarrow": "sw", "nearrow": "ne", "nwarrow": "nw"}
 
 CMD_RE = re.compile(r"\\([a-zA-Z]+)")
 # \stackrel{lbl}{arrow} / \overset{lbl}{arrow} / \underset{lbl}{arrow}
-OVER_RE = re.compile(r"\\(stackrel|overset|underset)\s*")
+OVER_RE = re.compile(r"\\(stackrel|overset|underset|underoverset)\s*")
 
 
 def find_array(tex: str):
@@ -119,14 +120,23 @@ def classify_cell(cell: str) -> dict:
     if m:
         which = m.group(1)
         label, rest = read_group(s[m.end():])
+        label2 = None
+        if which == "underoverset":  # \underoverset{below}{above}{arrow}
+            label2 = label
+            label, rest = read_group(rest)
         arrow, rest2 = read_group(rest)
         if not rest2.strip():
             cmds = CMD_RE.findall(arrow)
             if len(cmds) == 1 and cmds[0] in H_CMDS and \
                     arrow.strip() == "\\" + cmds[0]:
-                side = "below" if which == "underset" else "above"
-                return {"k": "h", "dir": H_CMDS[cmds[0]],
-                        "cmd": cmds[0], side: label.strip()}
+                res = {"k": "h", "dir": H_CMDS[cmds[0]], "cmd": cmds[0]}
+                if which == "underset":
+                    res["below"] = label.strip()
+                else:
+                    res["above"] = label.strip()
+                if label2:
+                    res["below"] = label2.strip()
+                return res
 
     cmds = CMD_RE.findall(s)
     bare = s.replace(" ", "")
@@ -141,18 +151,22 @@ def classify_cell(cell: str) -> dict:
             return {"k": "d", "dir": D_CMDS[c], "cmd": c}
 
     # \downarrow^{\mathrlap{f}} / \uparrow_{...} / {}^{f}\downarrow
+    # A pre-script sits to the arrow's west, a post-script to its east.
     for c in (*V_CMDS, *D_CMDS):
         pat = re.compile(
             r"^(?:\{\}[\^_]\{(?P<pre>.*)\})?\\" + c +
             r"(?:[\^_]\{?(?P<post>.*?)\}?)?$")
         m = pat.match(s.replace(" ", ""))
         if m and (m.group("pre") or m.group("post") or bare == "\\" + c):
-            label = m.group("pre") or m.group("post") or ""
-            label = re.sub(r"\\math[lr]lap", "", label).strip("{}")
-            kind = "v" if c in V_CMDS else "d"
-            return {"k": kind, "dir": V_CMDS.get(c) or D_CMDS[c],
-                    "cmd": c, "above": label} if label else \
-                   {"k": kind, "dir": V_CMDS.get(c) or D_CMDS[c], "cmd": c}
+            res = {"k": "v" if c in V_CMDS else "d",
+                    "dir": V_CMDS.get(c) or D_CMDS[c], "cmd": c}
+            for group, key in (("pre", "west"), ("post", "east")):
+                label = m.group(group)
+                if label:
+                    label = re.sub(r"\\math[lr]lap", "", label).strip("{}")
+                    if label.strip("\\; "):
+                        res[key] = label
+            return res
 
     if bare in ("=", "\\simeq", "\\cong"):
         return {"k": "h", "dir": "~", "cmd": bare.lstrip("\\") or "="}
@@ -161,6 +175,37 @@ def classify_cell(cell: str) -> dict:
     if any(c in H_CMDS or c in V_CMDS or c in D_CMDS for c in cmds):
         return {"k": "?", "tex": s}
     return {"k": "o", "tex": s}
+
+
+def merge_annotations(grid) -> None:
+    """Authors sometimes put an arrow label or an object annotation in its
+    own cell (`g & \\downarrow` or `c \\in & [X,A]`). Left as nodes these
+    open huge gaps, so: an object that is alone in its column merges into
+    the horizontally adjacent arrow (as a west/east label) or object (as
+    concatenated TeX)."""
+    cols = max(len(r) for r in grid)
+    for row in grid:
+        row.extend({"k": "e"} for _ in range(cols - len(row)))
+    for c in range(cols):
+        filled = [r for r in range(len(grid)) if grid[r][c]["k"] != "e"]
+        if len(filled) != 1 or grid[filled[0]][c]["k"] != "o":
+            continue
+        r = filled[0]
+        tex = grid[r][c]["tex"]
+        for dc in (1, -1):
+            cc = c + dc
+            if not 0 <= cc < cols:
+                continue
+            other = grid[r][cc]
+            if other["k"] in ("v", "d"):
+                other.setdefault("west" if dc == 1 else "east", tex)
+            elif other["k"] == "o":
+                other["tex"] = (f"{tex} {other['tex']}" if dc == 1
+                                else f"{other['tex']} {tex}")
+            else:
+                continue
+            grid[r][c] = {"k": "e"}
+            break
 
 
 def parse(mathml: str) -> tuple[str, list | None]:
@@ -177,6 +222,9 @@ def parse(mathml: str) -> tuple[str, list | None]:
     grid = [[classify_cell(c) for c in split_depth0(row, ("&",))]
             for row in split_depth0(body, ("\\\\",))]
     grid = [r for r in grid if any(c["k"] != "e" for c in r)]
+    if not grid:
+        return "empty", None
+    merge_annotations(grid)
     unknown = sum(c["k"] == "?" for r in grid for c in r)
     return ("ok" if not unknown else f"cells:{unknown}?"), grid
 

@@ -28,14 +28,21 @@ TEX_FIXUPS = [
     (re.compile(r"\\r?lap\s*"), ""),
     (re.compile(r"\\phantom\s*\{[^{}]*\}"), ""),
     (re.compile(r"\\hspace\s*\{[^{}]*\}"), r"\\;"),
-    (re.compile(r"\\mathrm\b"), r"\\operatorname"),
+    # itex sets | as an ordinary symbol; mitex spaces it as a relation.
+    (re.compile(r"(?<![\\{])\|"), r"{\\mid}"),
     (re.compile(r"\s+"), " "),
 ]
+
+# itex groups a run of letters into one upright identifier (Set, Tmf, op,
+# coim); LaTeX/mitex would typeset them as a product of italic variables.
+WORD_RE = re.compile(r"(\\[a-zA-Z]+)|([a-zA-Z]{2,})")
 
 
 def fix_tex(tex: str) -> str:
     for pat, rep in TEX_FIXUPS:
         tex = pat.sub(rep, tex)
+    tex = WORD_RE.sub(
+        lambda m: m.group(1) or r"\mathrm{%s}" % m.group(2), tex)
     return tex.strip()
 
 PREAMBLE = f"""#import "{FLETCHER}": diagram, node, edge
@@ -54,6 +61,22 @@ HOOK = {"hookrightarrow": "hook->", "hookleftarrow": "hook->",
         "Rightarrow": "=>", "Leftarrow": "=>"}
 
 STEPS = {"se": (1, 1), "sw": (1, -1), "ne": (-1, 1), "nw": (-1, -1)}
+
+# Travel vector (dx, dy; screen coords, y down) per arrow direction.
+TRAVEL = {"r": (1, 0), "l": (-1, 0), "lr": (1, 0), "~": (1, 0),
+          "d": (0, 1), "u": (0, -1),
+          "se": (1, 1), "sw": (-1, 1), "ne": (1, -1), "nw": (-1, -1)}
+# Where the author's script puts a label, as a viewer-space vector.
+WANT = {"above": (0, -1), "below": (0, 1), "east": (1, 0), "west": (-1, 0)}
+
+
+def label_side(direction: str, placement: str) -> str:
+    """fletcher's label-side (left/right relative to travel) that puts the
+    label where the itex placement (above/below/east/west) intended."""
+    tx, ty = TRAVEL[direction]
+    lx, ly = ty, -tx  # left of travel, screen coords
+    wx, wy = WANT[placement]
+    return "left" if lx * wx + ly * wy > 0 else "right"
 
 
 def ts(tex: str) -> str:
@@ -110,16 +133,23 @@ def emit(grid) -> tuple[str, str | None]:
 
             mark = HOOK.get(cell.get("cmd", ""), MARKS[cell["dir"]])
             args = [coord(a), coord(b), f'"{mark}"']
-            label = cell.get("above") or cell.get("below")
+            placement = next((p for p in ("above", "below", "east", "west")
+                              if cell.get(p)), None)
             if cell["dir"] == "~":
-                label = TILDE_LABEL.get(cell.get("cmd", "="), "=")
-            if label:
-                args.append(f"label: mi({ts(label)})")
-                if cell.get("below"):
-                    args.append("label-side: right")
+                sym = TILDE_LABEL.get(cell.get("cmd", "="), "=")
+                args.append(f"label: mi({ts(sym)})")
+            elif placement:
+                args.append(f"label: mi({ts(cell[placement])})")
+                args.append(f"label-side: {label_side(cell['dir'], placement)}")
+            if cell.get("cmd") in ("rightrightarrows", "leftleftarrows"):
+                lines.append(f"  edge({', '.join(args)}, shift: 2pt),")
+                args = [a for a in args if not a.startswith("label")]
+                lines.append(f"  edge({', '.join(args)}, shift: -2pt),")
+                continue
             lines.append(f"  edge({', '.join(args)}),")
 
-    code = PREAMBLE + "#diagram(\n" + "\n".join(lines) + "\n)\n"
+    code = (PREAMBLE + "#diagram(\n  spacing: (2.6em, 2.2em),\n"
+            + "\n".join(lines) + "\n)\n")
     return "ok", code
 
 
@@ -147,6 +177,8 @@ def main() -> None:
 
     con = common.connect()
     common.stage_table(con, "typst", "class TEXT, status TEXT, code TEXT")
+    if args.force:
+        con.execute("DELETE FROM typst")
 
     n = 0
     for row in common.pending(

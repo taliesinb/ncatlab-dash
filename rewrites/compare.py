@@ -42,9 +42,29 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--sample", type=int, default=40)
     ap.add_argument("--class", dest="cls", help="restrict to one class")
+    ap.add_argument("--hashes", help="file of hashes: fixed sample, "
+                    "in file order (keeps row numbers stable)")
     args = ap.parse_args()
 
     con = common.connect()
+    if args.hashes:
+        wanted = open(args.hashes).read().split()
+        rows = []
+        for h in wanted:
+            r = con.execute(
+                "SELECT t.hash hash, t.class class,"
+                " (SELECT page_name FROM mtables m WHERE m.hash=t.hash) name"
+                " FROM typst t WHERE t.hash=?", (h,)).fetchone()
+            if r:
+                rows.append(r)
+        out = common.OUT / "compare.html"
+        out.write_text(PAGE.format(n=len(rows), rows="".join(
+            ROW.format(n=i + 1, hash=r["hash"], name=r["name"],
+                       cls=r["class"])
+            for i, r in enumerate(rows))), encoding="utf-8")
+        print(f"{len(rows)} pairs -> {out}")
+        con.close()
+        return
     sql = """
         SELECT t.hash hash, t.class class,
                (SELECT page_name FROM mtables m WHERE m.hash = t.hash) name

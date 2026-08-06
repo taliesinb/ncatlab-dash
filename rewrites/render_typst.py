@@ -30,6 +30,7 @@ def main() -> None:
     ap.add_argument("--force", action="store_true")
     ap.add_argument("--limit", type=int)
     ap.add_argument("--jobs", type=int, default=8)
+    ap.add_argument("--hashes", help="file of hashes to (re)render")
     args = ap.parse_args()
 
     (common.OUT / "typst").mkdir(parents=True, exist_ok=True)
@@ -42,6 +43,11 @@ def main() -> None:
     todo = [(r["hash"], r["code"]) for r in con.execute(
         "SELECT hash, code FROM typst WHERE status='ok'")
         if r["hash"] not in done]
+    if args.hashes:
+        wanted = set(open(args.hashes).read().split())
+        todo = [(h, c) for r in con.execute(
+            "SELECT hash, code FROM typst WHERE status='ok'")
+            for h, c in [(r["hash"], r["code"])] if h in wanted]
     if args.limit:
         todo = todo[:args.limit]
 
