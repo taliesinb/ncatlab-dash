@@ -31,6 +31,9 @@ TEX_FIXUPS = [
     # itex sets | as an ordinary symbol; mitex spaces it as a relation.
     (re.compile(r"(?<![\\{])\|"), r"{\\mid}"),
     (re.compile(r"\\mathscr\b"), r"\\mathcal"),  # mitex lacks \mathscr
+    # typst math italicizes sans; \textsf gives the upright sans words
+    # the nLab uses for category names.
+    (re.compile(r"\\mathsf\b"), r"\\textsf"),
     (re.compile(r"\s+"), " "),
 ]
 
@@ -40,8 +43,8 @@ TEX_FIXUPS = [
 # rewrapped (\text{\mathrm{field}} renders literally).
 WORD_RE = re.compile(r"(\\[a-zA-Z]+)|([a-zA-Z]{2,})")
 PROTECTED_RE = re.compile(
-    r"\\(?:text|mathrm|mathit|mathbf|mathsf|mathtt|operatorname|mathcal"
-    r"|mathfrak|mathscr|mathbb)\s*\{[^{}]*\}")
+    r"\\(?:text|textsf|textrm|texttt|mathrm|mathit|mathbf|mathsf|mathtt"
+    r"|operatorname|mathcal|mathfrak|mathscr|mathbb)\s*\{[^{}]*\}")
 
 
 def fix_tex(tex: str) -> str:
@@ -137,11 +140,36 @@ def signature_rows(grid):
     return rows if len(rows) >= 2 else None
 
 
+# typst arrow symbol per arrow command; stretch() makes every row's arrow
+# exactly the same length, so \to and \mapsto line up.
+SIG_SYMS = {"mapsto": "arrow.r.bar", "longmapsto": "arrow.r.bar",
+            "hookrightarrow": "arrow.r.hook",
+            "twoheadrightarrow": "arrow.r.twohead",
+            "Rightarrow": "arrow.r.double",
+            "leftarrow": "arrow.l", "longleftarrow": "arrow.l",
+            "leftrightarrow": "arrow.l.r"}
+
+
+def sig_arrow(cell) -> str:
+    if cell["dir"] == "~":
+        return f"mi({ts(arrow_tex(cell))})"
+    sym = SIG_SYMS.get(cell.get("cmd", ""), "arrow.r")
+    core = f"stretch({sym}, size: #2.4em)"
+    attach = []
+    if cell.get("above"):
+        attach.append(f"t: #text(0.72em, mi({ts(cell['above'])}))")
+    if cell.get("below"):
+        attach.append(f"b: #text(0.72em, mi({ts(cell['below'])}))")
+    if attach:
+        return f"$attach({core}, {', '.join(attach)})$"
+    return f"${core}$"
+
+
 def emit_signature(rows) -> str:
     cells = []
     for lhs, arrow, rhs in rows:
         cells.append(f"  mi({ts('\\displaystyle ' + lhs['tex'])}),")
-        cells.append(f"  mi({ts(arrow_tex(arrow))}),")
+        cells.append(f"  {sig_arrow(arrow)},")
         cells.append(f"  mi({ts('\\displaystyle ' + rhs['tex'])}),")
     return (PREAMBLE
             + "#grid(\n  columns: 3, column-gutter: 0.4em,"
