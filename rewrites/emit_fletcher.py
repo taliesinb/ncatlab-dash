@@ -13,10 +13,12 @@ Writes `typst` rows: hash, class (recomputed from the parsed grid), status
 """
 
 import argparse
+import html
 import json
 import re
 
 import common
+import parse_arrays
 
 FLETCHER = "@preview/fletcher:0.5.8"
 MITEX = "@preview/mitex:0.2.6"
@@ -45,7 +47,7 @@ TEX_FIXUPS = [
 WORD_RE = re.compile(r"(\\[a-zA-Z]+)|([a-zA-Z]{2,})")
 PROTECTED_RE = re.compile(
     r"\\(?:text|textsf|textrm|texttt|mathrm|mathit|mathbf|mathsf|mathtt"
-    r"|operatorname|mathcal|mathfrak|mathscr|mathbb)\s*\{[^{}]*\}")
+    r"|operatorname|mathcal|mathfrak|mathscr|mathbb|begin|end)\s*\{[^{}]*\}")
 
 
 def fix_tex(tex: str) -> str:
@@ -64,7 +66,7 @@ def fix_tex(tex: str) -> str:
     return tex.strip()
 
 PREAMBLE = f"""#import "{FLETCHER}": diagram, node, edge
-#import "{MITEX}": mi
+#import "{MITEX}": mi, mitex
 #set page(width: auto, height: auto, margin: 4pt, fill: white)
 #set text(size: 11pt)
 """
@@ -196,6 +198,20 @@ def emit_table(grid) -> str:
             + f"#grid(\n  columns: {cols}, column-gutter: 1.4em,"
             " row-gutter: 1em,\n  align: center + horizon,\n"
             + "\n".join(cells) + "\n)\n")
+
+
+def emit_equation(tex: str) -> str:
+    """Fallback for diagrams that are really formulas: \\begin{aligned}
+    derivations and equations with embedded arrays. Rendered whole via
+    mitex, with itex's \\array translated to a matrix environment."""
+    while True:
+        found = parse_arrays.find_array(tex)
+        if not found:
+            break
+        start, end, body = found
+        tex = (tex[:start] + "\\begin{matrix}" + body + "\\end{matrix}"
+               + tex[end:])
+    return PREAMBLE + f"#mitex({ts(tex)})\n"
 
 
 def emit(grid) -> tuple[str, str | None]:
@@ -373,6 +389,28 @@ def main() -> None:
             "INSERT OR REPLACE INTO typst(hash, class, status, code)"
             " VALUES (?,?,?,?)",
             (row["hash"], classify(grid), status, code))
+        n += 1
+
+    # Formulas that only look like diagrams: aligned derivations
+    # (no-array) and arrays embedded in larger formulas (wrapped) render
+    # whole as mitex equations.
+    for row in common.pending(
+            con,
+            "SELECT p.hash hash, min(m.mathml) mathml FROM parsed p"
+            " JOIN mtables m ON m.hash = p.hash"
+            " WHERE p.status IN ('wrapped', 'no-array') GROUP BY p.hash",
+            "typst", args.force):
+        m = parse_arrays.ANNOTATION_RE.search(row["mathml"])
+        if not m:
+            continue
+        tex = html.unescape(m.group(1)).strip()
+        tex = re.sub(r"&#(\d+);", lambda m: chr(int(m.group(1))), tex)
+        tex = re.sub(r"&#x([0-9a-fA-F]+);",
+                     lambda m: chr(int(m.group(1), 16)), tex)
+        con.execute(
+            "INSERT OR REPLACE INTO typst(hash, class, status, code)"
+            " VALUES (?,?,?,?)",
+            (row["hash"], "equation", "ok", emit_equation(tex)))
         n += 1
     con.commit()
     print(f"emitted {n} new; totals by status / class:")
