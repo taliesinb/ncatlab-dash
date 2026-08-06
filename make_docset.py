@@ -77,7 +77,7 @@ def norm_key(name: str) -> str:
     """Case-, dash-, whitespace-, and infinity-symbol-insensitive form."""
     key = name.replace("∞", "infinity")
     key = DASH_RUN_RE.sub("-", key)
-    return re.sub(r"\s+", " ", key).strip().lower()
+    return re.sub(r"\s+", " ", key).strip().lower().lstrip("+*# ")
 
 
 def name_variants(name: str) -> set[str]:
@@ -91,7 +91,25 @@ def name_variants(name: str) -> set[str]:
     return variants
 
 
-def trim_aliases(canonical_name: str, aliases: list[str]) -> list[str]:
+def person_tokens(name: str) -> list[str]:
+    """Words of a person name, dots/commas ignored: 'A. A. Markov Jr.' ->
+    ['a', 'a', 'markov', 'jr']."""
+    return norm_key(re.sub(r"[.,]", " ", name)).split()
+
+
+def person_alias_redundant(alias: str, canonical_name: str) -> bool:
+    """People aliases nobody would type into Dash: names in non-Latin
+    scripts, and initials-variants that add no word beyond the canonical
+    name ('A A Markov Jr' for 'Andrey Markov Jr'). Transliteration variants
+    ('A Souslin' for 'Andrei Suslin') introduce a new word and survive."""
+    if any(c.isalpha() and ord(c) > 0x24F for c in alias):
+        return True
+    known = set(person_tokens(canonical_name))
+    return all(len(t) == 1 or t in known for t in person_tokens(alias))
+
+
+def trim_aliases(canonical_name: str, aliases: list[str],
+                 person: bool = False) -> list[str]:
     """Drop aliases that are mere spelling variants (case, dashes, plurals)
     of the canonical name or of an already-kept alias. All names here refer
     to the same page, so a variant-collision is always a true redundancy.
@@ -108,6 +126,8 @@ def trim_aliases(canonical_name: str, aliases: list[str]) -> list[str]:
     seen = name_variants(canonical_name)
     for alias in sorted(
             aliases, key=lambda a: (not a.isascii(), inflected(a), len(a), a)):
+        if person and person_alias_redundant(alias, canonical_name):
+            continue
         variants = name_variants(alias)
         if variants & seen:
             continue
@@ -340,7 +360,8 @@ def main() -> None:
         if not typ or (included is not None and pid not in included):
             continue
         total_aliases += len(aliases)
-        kept = trim_aliases(canonical.get(pid, ""), aliases)
+        kept = trim_aliases(canonical.get(pid, ""), aliases,
+                            person=typ == "Person")
         trimmed += len(aliases) - len(kept)
         target = canonical.get(pid, "").replace("<", "").replace(">", "")
         for alias in kept:
