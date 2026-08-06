@@ -143,7 +143,11 @@ def trim_label(frag: str) -> str:
     braces: {}^{\\alpha_{x,y}} -> \\alpha_{x,y}."""
     frag = re.sub(r"\\math[lr]lap\b", "", frag).strip()
     while frag:
-        if frag[0] in "^_":
+        if frag.startswith("{}"):  # the {} carrier of a prescript
+            frag = frag[2:].strip()
+        elif re.match(r"\\[,;:!]", frag):  # leading spacing macros
+            frag = frag[2:].strip()
+        elif frag[0] in "^_":
             frag = frag[1:].strip()
         elif frag[0] == "{" and frag[-1] == "}":
             depth = 0
