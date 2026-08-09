@@ -35,7 +35,12 @@ def main() -> None:
     ap.add_argument("--limit", type=int)
     ap.add_argument("--show", type=int, default=5,
                     help="print this many mismatches")
+    ap.add_argument("--emit", action="store_true",
+                    help="diff the emitter (typst table) instead of grids")
     args = ap.parse_args()
+
+    if args.emit:
+        return diff_emit(args)
 
     con = common.connect()
     rows = con.execute(
@@ -91,6 +96,57 @@ def main() -> None:
           f" ({status_match/n:.1%});"
           f" grid match {grid_match}/{ok_total} of parsed-ok"
           f" ({grid_match/ok_total:.1%})")
+    con.close()
+
+
+def diff_emit(args) -> None:
+    con = common.connect()
+    rows = con.execute(
+        "SELECT p.hash hash, p.status pstatus, min(m.mathml) mathml,"
+        " t.status tstatus, t.class tclass, t.code tcode"
+        " FROM parsed p JOIN mtables m ON m.hash = p.hash"
+        " LEFT JOIN typst t ON t.hash = p.hash GROUP BY p.hash").fetchall()
+    if args.limit:
+        rows = rows[:args.limit]
+    cases = []
+    for r in rows:
+        tex = decode_tex(r["mathml"])
+        if tex is None:
+            continue
+        cases.append((r, tex))
+    payload = "\x00".join(tex for _, tex in cases) + "\x00"
+    proc = subprocess.run([str(BINARY), "typsts"], input=payload,
+                          capture_output=True, text=True, timeout=1200)
+    outs = proc.stdout.split("\x00")
+    n = match = 0
+    shown = 0
+    for (r, tex), out in zip(cases, outs):
+        rs_status, rs_class, rs_code = (out.split("\x1f") + ["", ""])[:3]
+        n += 1
+        if r["tstatus"] is None:
+            ok = rs_status.startswith("-")
+        else:
+            ok = (rs_status == r["tstatus"]
+                  and rs_class == (r["tclass"] or "")
+                  and (rs_code or "") == (r["tcode"] or ""))
+        if ok:
+            match += 1
+        elif shown < args.show:
+            shown += 1
+            print(f"== EMIT MISMATCH {r['hash']}"
+                  f" py=({r['tstatus']},{r['tclass']})"
+                  f" rs=({rs_status},{rs_class})")
+            pc, rc = (r["tcode"] or ""), (rs_code or "")
+            if pc != rc:
+                for i, (a, b) in enumerate(zip(pc.splitlines(), rc.splitlines())):
+                    if a != b:
+                        print(f"  py| {a[:150]}")
+                        print(f"  rs| {b[:150]}")
+                        break
+                if len(pc.splitlines()) != len(rc.splitlines()):
+                    print(f"  (py {len(pc.splitlines())} lines,"
+                          f" rs {len(rc.splitlines())} lines)")
+    print(f"\n{n} formulas: emit match {match}/{n} ({match/n:.1%})")
     con.close()
 
 

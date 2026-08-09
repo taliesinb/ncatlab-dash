@@ -10,3 +10,4 @@ edition = "2021"
 mitex-parser = { path = "../../../mitex/crates/mitex-parser" }
 mitex-spec-gen = { path = "../../../mitex/crates/mitex-spec-gen" }
 rowan = "0.15.15"
+regex = "1"
