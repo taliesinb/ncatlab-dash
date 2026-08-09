@@ -1,6 +1,7 @@
 //! CLI for the nlab-typ pipeline stages.
 mod emit;
 mod grid;
+mod prose;
 
 use std::io::Read;
 
@@ -35,6 +36,10 @@ fn main() {
                     Err(status) => write!(out, "{status}\u{1f}\u{0}").unwrap(),
                 }
             }
+        }
+        "page" => {
+            std::env::set_var("NLAB_LOCAL_MITEX", "1");
+            print!("{}", prose::page_to_typst(&input));
         }
         "typsts" => {
             use std::io::Write;

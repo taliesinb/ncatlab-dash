@@ -28,7 +28,7 @@ const PREAMBLE_LOCAL: &str = "#import \"@preview/fletcher:0.5.8\": diagram, node
 /// In local-mitex mode the itex word-identifier dialect lives in the
 /// converter (mi-itex), so the emitted calls switch and the word-grouping
 /// regex pass is skipped.
-fn localize_calls(code: String) -> String {
+pub(crate) fn localize_calls(code: String) -> String {
     if !local_mitex() {
         return code;
     }
@@ -852,6 +852,10 @@ static SEP_RE: Lazy<Regex> = Lazy::new(|| {
     .unwrap()
 });
 
+pub(crate) fn emit_equation_pub(tex: &str) -> String {
+    emit_equation(tex)
+}
+
 fn emit_equation(tex: &str) -> String {
     let mut tex = tex.to_string();
     while let Some((start, end, body)) = grid::find_array(&tex) {
@@ -875,8 +879,22 @@ pub(crate) fn emit_formula(tex: &str) -> (String, String, Option<String>) {
             let code = body.map(|b| localize_calls(format!("{}{}", preamble(), b)));
             (classify(&g), status, code)
         }
-        Err(status) if status == "wrapped" || status == "no-array" => wrapped_path(tex),
+        Err(status) if status == "wrapped" || status == "no-array" => {
+            let (cls, status, body) = wrapped_path(tex);
+            let code = body.map(|b| localize_calls(format!("{}{}", preamble(), b)));
+            (cls, status, code)
+        }
         Err(status) => ("-".into(), format!("-{}", status), None),
+    }
+}
+
+/// The typst body (no preamble) for a display formula, when the diagram
+/// pipeline can handle it; None means "render as plain math".
+pub(crate) fn emit_formula_body(tex: &str) -> Option<String> {
+    match grid::parse_formula_grid(tex) {
+        Ok(g) => emit(&g).1,
+        Err(status) if status == "wrapped" || status == "no-array" => wrapped_path(tex).2,
+        Err(_) => None,
     }
 }
 
@@ -920,12 +938,11 @@ fn wrapped_path(tex: &str) -> (String, String, Option<String>) {
                         }
                         cells.push(format!("  [{}],", b.as_ref().unwrap().trim()));
                     }
-                    let code = localize_calls(format!(
-                        "{}#grid(columns: {}, column-gutter: 2em, align: horizon,\n{}\n)\n",
-                        preamble(),
+                    let code = format!(
+                        "#grid(columns: {}, column-gutter: 2em, align: horizon,\n{}\n)\n",
                         cells.len(),
                         cells.join("\n")
-                    ));
+                    );
                     let cls = if grids.len() == 1 {
                         classify(&grids[0])
                     } else {
@@ -939,9 +956,5 @@ fn wrapped_path(tex: &str) -> (String, String, Option<String>) {
     if spans.iter().any(|(_, _, b)| DIAG_RE.is_match(b)) {
         return ("wrapped-diagram".into(), "wrapped-diagram".into(), None);
     }
-    (
-        "equation".into(),
-        "ok".into(),
-        Some(localize_calls(format!("{}{}", preamble(), emit_equation(tex)))),
-    )
+    ("equation".into(), "ok".into(), Some(emit_equation(tex)))
 }

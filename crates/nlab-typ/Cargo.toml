@@ -11,3 +11,4 @@ mitex-parser = { path = "../../../mitex/crates/mitex-parser" }
 mitex-spec-gen = { path = "../../../mitex/crates/mitex-spec-gen" }
 rowan = "0.15.15"
 regex = "1"
+pulldown-cmark = { version = "0.12", default-features = false }
