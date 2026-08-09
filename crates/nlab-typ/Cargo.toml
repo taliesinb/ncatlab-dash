@@ -1,0 +1,12 @@
+[package]
+name = "nlab-typ"
+description = "Recognize nLab itex diagram patterns on the mitex CST and emit native typst/fletcher"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Local checkout of our mitex fork (github.com/taliesinb/mitex),
+# expected as a sibling of this repository at ~/github/mitex.
+mitex-parser = { path = "../../../mitex/crates/mitex-parser" }
+mitex-spec-gen = { path = "../../../mitex/crates/mitex-spec-gen" }
+rowan = "0.15.15"
