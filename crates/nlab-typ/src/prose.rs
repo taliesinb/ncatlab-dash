@@ -110,6 +110,15 @@ fn extract_wiki(src: &str, stash: &mut Stash) -> String {
             Some((t, x)) => (t, x),
             None => (inner, inner),
         };
+        // [[Name.pdf:file]] links to an uploaded file, not a wiki page
+        if let Some(file) = target.strip_suffix(":file") {
+            let text = text.strip_suffix(":file").unwrap_or(text);
+            return stash.put(format!(
+                "#link(\"https://ncatlab.org/nlab/files/{}\")[{}]",
+                file.trim().replace(' ', "+"),
+                escape_typst(text)
+            ));
+        }
         stash.put(format!(
             "#link(\"{}\")[{}]",
             wiki_target_url(target),
@@ -148,10 +157,10 @@ fn extract_fences(src: &str, stash: &mut Stash) -> String {
                 .map(|w| w[1..].to_string())
                 .unwrap_or_default();
             let (kind, style) = env_kind(&class);
-            let label = id
-                .map(|i| format!("#metadata(none)#label(\"{}\") ", i))
+            let id_arg = id
+                .map(|i| format!(", id: \"{}\"", i))
                 .unwrap_or_default();
-            out.push(stash.put(format!("#nlab-env(\"{}\", \"{}\")[{}", kind, style, label)));
+            out.push(stash.put(format!("#nlab-env(\"{}\", \"{}\"{})[", kind, style, id_arg)));
             open_stack.push(true);
             continue;
         }
@@ -304,26 +313,37 @@ fn markdown_to_typst(src: &str) -> String {
 
 const PAGE_PREAMBLE: &str = r##"#import "@local/mitex:0.2.7": mi-itex, mitex-itex
 #import "@preview/fletcher:0.5.8": diagram, node, edge
-#set page(width: 17cm, height: auto, margin: 1.6cm, fill: white)
+#set page(width: 17cm, height: 25cm, margin: 1.6cm, fill: white, numbering: "1")
 #set text(10.5pt)
 #set heading(numbering: "1.")
 #show link: set text(fill: rgb("#1a6318"))
 #let nlab-count = counter("nlab-env")
 #show heading.where(level: 1): it => { nlab-count.update(0); it }
-#let nlab-env(kind, style, body) = {
+#let nlab-env(kind, style, id: none, body) = {
   if style == "num" {
     nlab-count.step()
-    block(inset: (left: 0.6em), above: 1em, below: 1em)[
-      #strong[#kind #context { counter(heading).get().at(0, default: 0) }.#context { nlab-count.get().first() }.] #body]
+    block(inset: (left: 0.6em), above: 1em, below: 1em)[#context {
+      let num = str(counter(heading).get().at(0, default: 0)) + "." + str(nlab-count.get().first())
+      if id != none { [#metadata(num)#label(id)] }
+      strong[#kind #num.]
+    } #body]
   } else if style == "proof" {
     block(inset: (left: 0.6em), above: 1em, below: 1em)[_Proof._ #body #h(1fr) $qed$]
   } else {
     block(above: 1em, below: 1em, body)
   }
 }
+#let nlab-ref(id) = context {
+  let ms = query(label(id))
+  if ms.len() > 0 and ms.first().func() == metadata and ms.first().value != none {
+    link(label(id), ms.first().value)
+  } else {
+    link(label(id))[(above)]
+  }
+}
 "##;
 
-pub(crate) fn page_to_typst(src: &str) -> String {
+pub(crate) fn page_to_typst(src: &str, title: Option<&str>) -> String {
     let mut stash = Stash { items: Vec::new() };
     // strip trailing metadata lines
     let src: String = src
@@ -338,6 +358,15 @@ pub(crate) fn page_to_typst(src: &str) -> String {
     let src = extract_math(&src, &mut stash);
     let src = extract_fences(&src, &mut stash);
     let src = extract_wiki(&src, &mut stash);
+    // \ref{Id}: Maruku turns these into numbered links to environment
+    // anchors (the live site fills the number with JavaScript; we query
+    // the env's metadata statically).
+    let ref_re = regex::Regex::new(r"\\ref\{([A-Za-z0-9:_-]+)\}").unwrap();
+    let src = ref_re
+        .replace_all(&src, |c: &regex::Captures| {
+            stash.put(format!("#nlab-ref(\"{}\")", &c[1]))
+        })
+        .to_string();
     // Maruku anchor IALs: {#Id} standalone or inline
     let anchor_re = regex::Regex::new(r"\{#([A-Za-z0-9:_-]+)\}").unwrap();
     let src = anchor_re
@@ -353,5 +382,13 @@ pub(crate) fn page_to_typst(src: &str) -> String {
             stash.items[c[1].parse::<usize>().unwrap()].clone()
         })
         .to_string();
-    emit::localize_calls(format!("{}\n{}\n", PAGE_PREAMBLE, body))
+    let title_block = title
+        .map(|t| {
+            format!(
+                "#align(center)[#text(1.7em, weight: 700)[{}]]\n#v(0.5em)\n",
+                escape_typst(t)
+            )
+        })
+        .unwrap_or_default();
+    emit::localize_calls(format!("{}\n{}{}\n", PAGE_PREAMBLE, title_block, body))
 }

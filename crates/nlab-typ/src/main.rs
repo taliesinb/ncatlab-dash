@@ -39,7 +39,8 @@ fn main() {
         }
         "page" => {
             std::env::set_var("NLAB_LOCAL_MITEX", "1");
-            print!("{}", prose::page_to_typst(&input));
+            let title = args.get(2).map(String::as_str);
+            print!("{}", prose::page_to_typst(&input, title));
         }
         "typsts" => {
             use std::io::Write;
