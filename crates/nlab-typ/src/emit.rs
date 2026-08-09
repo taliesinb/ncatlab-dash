@@ -23,6 +23,21 @@ mod once_cell_lite {
 }
 
 const PREAMBLE: &str = "#import \"@preview/fletcher:0.5.8\": diagram, node, edge\n#import \"@preview/mitex:0.2.6\": mi, mitex\n#set page(width: auto, height: auto, margin: 4pt, fill: white)\n#set text(size: 11pt)\n";
+const PREAMBLE_LOCAL: &str = "#import \"@preview/fletcher:0.5.8\": diagram, node, edge\n#import \"@local/mitex:0.2.7\": mi, mitex\n#set page(width: auto, height: auto, margin: 4pt, fill: white)\n#set text(size: 11pt)\n";
+
+/// With NLAB_LOCAL_MITEX=1, emit against the locally built mitex package
+/// (fork branch `nlab`), whose fixes make several fix_tex workarounds
+/// unnecessary: the circled-operator/set-operator unicode substitutions,
+/// \mathscr -> \mathcal, \mathsf -> \textsf, and the plain (non-pair)
+/// \underoverset translation.
+fn local_mitex() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("NLAB_LOCAL_MITEX").is_ok_and(|v| v == "1"))
+}
+
+fn preamble() -> &'static str {
+    if local_mitex() { PREAMBLE_LOCAL } else { PREAMBLE }
+}
 
 /// Python dict.get truthiness: an empty-string value is as good as absent.
 fn cget<'a>(c: &'a Cell, k: &str) -> Option<&'a str> {
@@ -131,11 +146,19 @@ fn translate_stacked_pairs(mut tex: String, stash: &mut Vec<String>) -> String {
 }
 
 fn translate_underoverset(mut tex: String, stash: &mut Vec<String>) -> String {
-    while let Some(i) = tex.find("\\underoverset") {
+    let mut search_from = 0usize;
+    while let Some(off) = tex[search_from..].find("\\underoverset") {
+        let i = search_from + off;
         let (below, rest) = grid::read_group(&tex[i + "\\underoverset".len()..]);
         let (above, rest) = grid::read_group(&rest);
         let (base, rest) = grid::read_group(&rest);
-        let repl = if ARROWISH_RE.is_match(&above) && ARROWISH_RE.is_match(&below) {
+        let is_pair = ARROWISH_RE.is_match(&above) && ARROWISH_RE.is_match(&below);
+        if local_mitex() && !is_pair {
+            // the fixed mitex knows \underoverset natively
+            search_from = i + "\\underoverset".len();
+            continue;
+        }
+        let repl = if is_pair {
             let base_s = base.trim();
             let base_s = if base_s.is_empty() { "\\;" } else { base_s };
             let repl = format!(
@@ -195,24 +218,32 @@ pub(crate) fn fix_tex(tex: &str) -> String {
     let tex = LIM_R_RE
         .replace_all(&tex, "\\underset{\\longrightarrow}{\\lim}{}")
         .to_string();
-    let tex = CIRCLED_RE
-        .replace_all(&tex, |c: &regex::Captures| {
-            CIRCLED
-                .iter()
-                .find(|(k, _)| *k == &c[1])
-                .map(|(_, v)| *v)
-                .unwrap()
-                .to_string()
-        })
-        .to_string();
+    let tex = if local_mitex() {
+        tex
+    } else {
+        CIRCLED_RE
+            .replace_all(&tex, |c: &regex::Captures| {
+                CIRCLED
+                    .iter()
+                    .find(|(k, _)| *k == &c[1])
+                    .map(|(_, v)| *v)
+                    .unwrap()
+                    .to_string()
+            })
+            .to_string()
+    };
     let tex = LAP_RE.replace_all(&tex, "").to_string();
     let tex = RLAP_RE.replace_all(&tex, "").to_string();
     let tex = PHANTOM_RE.replace_all(&tex, "").to_string();
     let tex = HSPACE_RE.replace_all(&tex, "\\;").to_string();
     let tex = pipe_rule(&tex);
     let tex = SLASH_N_RE.replace_all(&tex, "n").to_string();
-    let tex = MATHSCR_RE.replace_all(&tex, "\\mathcal").to_string();
-    let tex = MATHSF_RE.replace_all(&tex, "\\textsf").to_string();
+    let tex = if local_mitex() {
+        tex
+    } else {
+        let tex = MATHSCR_RE.replace_all(&tex, "\\mathcal").to_string();
+        MATHSF_RE.replace_all(&tex, "\\textsf").to_string()
+    };
     let tex = WS_RE.replace_all(&tex, " ").to_string();
 
     let mut saved: Vec<String> = Vec::new();
@@ -827,7 +858,7 @@ pub(crate) fn emit_formula(tex: &str) -> (String, String, Option<String>) {
     match grid::parse_formula_grid(tex) {
         Ok(g) => {
             let (status, body) = emit(&g);
-            let code = body.map(|b| format!("{}{}", PREAMBLE, b));
+            let code = body.map(|b| format!("{}{}", preamble(), b));
             (classify(&g), status, code)
         }
         Err(status) if status == "wrapped" || status == "no-array" => wrapped_path(tex),
@@ -877,7 +908,7 @@ fn wrapped_path(tex: &str) -> (String, String, Option<String>) {
                     }
                     let code = format!(
                         "{}#grid(columns: {}, column-gutter: 2em, align: horizon,\n{}\n)\n",
-                        PREAMBLE,
+                        preamble(),
                         cells.len(),
                         cells.join("\n")
                     );
@@ -897,6 +928,6 @@ fn wrapped_path(tex: &str) -> (String, String, Option<String>) {
     (
         "equation".into(),
         "ok".into(),
-        Some(format!("{}{}", PREAMBLE, emit_equation(tex))),
+        Some(format!("{}{}", preamble(), emit_equation(tex))),
     )
 }
