@@ -23,7 +23,17 @@ mod once_cell_lite {
 }
 
 const PREAMBLE: &str = "#import \"@preview/fletcher:0.5.8\": diagram, node, edge\n#import \"@preview/mitex:0.2.6\": mi, mitex\n#set page(width: auto, height: auto, margin: 4pt, fill: white)\n#set text(size: 11pt)\n";
-const PREAMBLE_LOCAL: &str = "#import \"@preview/fletcher:0.5.8\": diagram, node, edge\n#import \"@local/mitex:0.2.7\": mi, mitex\n#set page(width: auto, height: auto, margin: 4pt, fill: white)\n#set text(size: 11pt)\n";
+const PREAMBLE_LOCAL: &str = "#import \"@preview/fletcher:0.5.8\": diagram, node, edge\n#import \"@local/mitex:0.2.7\": mi-itex, mitex-itex\n#set page(width: auto, height: auto, margin: 4pt, fill: white)\n#set text(size: 11pt)\n";
+
+/// In local-mitex mode the itex word-identifier dialect lives in the
+/// converter (mi-itex), so the emitted calls switch and the word-grouping
+/// regex pass is skipped.
+fn localize_calls(code: String) -> String {
+    if !local_mitex() {
+        return code;
+    }
+    code.replace("#mitex(", "#mitex-itex(").replace("mi(", "mi-itex(")
+}
 
 /// With NLAB_LOCAL_MITEX=1, emit against the locally built mitex package
 /// (fork branch `nlab`), whose fixes make several fix_tex workarounds
@@ -246,6 +256,10 @@ pub(crate) fn fix_tex(tex: &str) -> String {
     };
     let tex = WS_RE.replace_all(&tex, " ").to_string();
 
+    if local_mitex() {
+        // itex word tokenization is native in the local mitex (mi-itex)
+        return tex.trim().to_string();
+    }
     let mut saved: Vec<String> = Vec::new();
     let tex = PROTECTED_RE
         .replace_all(&tex, |c: &regex::Captures| {
@@ -858,7 +872,7 @@ pub(crate) fn emit_formula(tex: &str) -> (String, String, Option<String>) {
     match grid::parse_formula_grid(tex) {
         Ok(g) => {
             let (status, body) = emit(&g);
-            let code = body.map(|b| format!("{}{}", preamble(), b));
+            let code = body.map(|b| localize_calls(format!("{}{}", preamble(), b)));
             (classify(&g), status, code)
         }
         Err(status) if status == "wrapped" || status == "no-array" => wrapped_path(tex),
@@ -906,12 +920,12 @@ fn wrapped_path(tex: &str) -> (String, String, Option<String>) {
                         }
                         cells.push(format!("  [{}],", b.as_ref().unwrap().trim()));
                     }
-                    let code = format!(
+                    let code = localize_calls(format!(
                         "{}#grid(columns: {}, column-gutter: 2em, align: horizon,\n{}\n)\n",
                         preamble(),
                         cells.len(),
                         cells.join("\n")
-                    );
+                    ));
                     let cls = if grids.len() == 1 {
                         classify(&grids[0])
                     } else {
@@ -928,6 +942,6 @@ fn wrapped_path(tex: &str) -> (String, String, Option<String>) {
     (
         "equation".into(),
         "ok".into(),
-        Some(format!("{}{}", preamble(), emit_equation(tex))),
+        Some(localize_calls(format!("{}{}", preamble(), emit_equation(tex)))),
     )
 }

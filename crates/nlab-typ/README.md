@@ -27,5 +27,9 @@ cp target/wasm32-unknown-unknown/release/mitex_wasm.wasm "$PKG/mitex.wasm"
 Then `NLAB_LOCAL_MITEX=1 nlab-typ typsts` emits against
 `@local/mitex:0.2.7` with the redundant workarounds disabled
 (circled/set-operator unicode, `\mathscr`, `\mathsf`, plain
-`\underoverset`). On the 1,840 corpus formulas using those commands:
-96.5% compile in local mode vs 81.2% with stock 0.2.6 + workarounds.
+`\underoverset`, and the itex word-grouping regex — the fork's
+`feat/itex-word-identifiers` implements itex's letter-run tokenization
+natively, emitted as `mi-itex(...)`). On the 1,840 corpus formulas
+using the affected commands: 96.5% compile in local mode vs 81.2% with
+stock 0.2.6 + workarounds; a random 800-formula corpus sample compiles
+at 98.2% in full local mode.
