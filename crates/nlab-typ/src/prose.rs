@@ -148,7 +148,9 @@ fn extract_fences(src: &str, stash: &mut Stash) -> String {
                 .map(|w| w[1..].to_string())
                 .unwrap_or_default();
             let (kind, style) = env_kind(&class);
-            let label = id.map(|i| format!(" #label(\"{}\")", i)).unwrap_or_default();
+            let label = id
+                .map(|i| format!("#metadata(none)#label(\"{}\") ", i))
+                .unwrap_or_default();
             out.push(stash.put(format!("#nlab-env(\"{}\", \"{}\")[{}", kind, style, label)));
             open_stack.push(true);
             continue;
@@ -272,7 +274,11 @@ fn markdown_to_typst(src: &str) -> String {
             Event::Start(Tag::BlockQuote(_)) => out.push_str("\n#quote(block: true)["),
             Event::End(TagEnd::BlockQuote(_)) => out.push_str("]\n"),
             Event::Start(Tag::Link { dest_url, .. }) => {
-                out.push_str(&format!("#link(\"{}\")[", dest_url));
+                if let Some(anchor) = dest_url.strip_prefix('#') {
+                    out.push_str(&format!("#link(label(\"{}\"))[", anchor));
+                } else {
+                    out.push_str(&format!("#link(\"{}\")[", dest_url));
+                }
             }
             Event::End(TagEnd::Link) => out.push(']'),
             Event::Start(Tag::CodeBlock(_)) => out.push_str("\n```\n"),
@@ -301,6 +307,7 @@ const PAGE_PREAMBLE: &str = r##"#import "@local/mitex:0.2.7": mi-itex, mitex-ite
 #set page(width: 17cm, height: auto, margin: 1.6cm, fill: white)
 #set text(10.5pt)
 #set heading(numbering: "1.")
+#show link: set text(fill: rgb("#1a6318"))
 #let nlab-count = counter("nlab-env")
 #show heading.where(level: 1): it => { nlab-count.update(0); it }
 #let nlab-env(kind, style, body) = {
@@ -331,6 +338,13 @@ pub(crate) fn page_to_typst(src: &str) -> String {
     let src = extract_math(&src, &mut stash);
     let src = extract_fences(&src, &mut stash);
     let src = extract_wiki(&src, &mut stash);
+    // Maruku anchor IALs: {#Id} standalone or inline
+    let anchor_re = regex::Regex::new(r"\{#([A-Za-z0-9:_-]+)\}").unwrap();
+    let src = anchor_re
+        .replace_all(&src, |c: &regex::Captures| {
+            stash.put(format!("#metadata(none)#label(\"{}\")", &c[1]))
+        })
+        .to_string();
     let body = markdown_to_typst(&src);
     // resolve placeholders (escape pass never touches PUA chars)
     let re = regex::Regex::new(&format!("{}(\\d+){}", P0, P1)).unwrap();
