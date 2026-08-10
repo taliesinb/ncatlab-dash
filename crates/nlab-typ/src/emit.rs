@@ -320,6 +320,8 @@ pub(crate) fn fix_itex_builtins(tex: &str) -> String {
         ("Hom", "\\mathrm{Hom}"),
         ("colim", "\\mathrm{colim}"),
         ("Aut", "\\mathrm{Aut}"),
+        ("into", "\\hookrightarrow"),
+        ("onto", "\\twoheadrightarrow"),
         ("End", "\\mathrm{End}"),
         ("Ob", "\\mathrm{Ob}"),
         ("Mor", "\\mathrm{Mor}"),

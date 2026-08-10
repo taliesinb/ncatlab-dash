@@ -509,8 +509,9 @@ pub(crate) fn page_to_typst(src: &str, title: Option<&str>) -> String {
         src = format!("{}\n{}", src, stash.put("]".into()));
     }
     let src = src.replace("\\linebreak", " ");
-    // maruku table-of-contents list item
-    let src = regex::Regex::new(r"(?m)^\*\s*table of contents\s*\n\{:\s*toc[^}]*\}\s*$")
+    // maruku table-of-contents list item ("* table of contents\n{:toc}",
+    // "* automatic toc {: toc}", ...)
+    let src = regex::Regex::new(r"(?m)^\*[^\n{]*\n?\{:\s*toc[^}]*\}\s*$")
         .unwrap()
         .replace_all(&src, |_: &regex::Captures| {
             stash.put("#outline(depth: 2)".into())
