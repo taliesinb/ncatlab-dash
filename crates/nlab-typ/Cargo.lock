@@ -296,6 +296,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "mitex"
+version = "0.2.7"
+dependencies = [
+ "mitex-parser",
+ "mitex-spec-gen",
+ "rowan",
+]
+
+[[package]]
 name = "mitex-glob"
 version = "0.2.7"
 
@@ -347,6 +356,7 @@ dependencies = [
 name = "nlab-typ"
 version = "0.1.0"
 dependencies = [
+ "mitex",
  "mitex-parser",
  "mitex-spec-gen",
  "pulldown-cmark",
