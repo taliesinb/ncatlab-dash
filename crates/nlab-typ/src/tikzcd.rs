@@ -29,6 +29,8 @@ struct Label {
     pos: Option<f64>,
     sloped: bool,
     name: Option<String>,
+    rotate: Option<f64>,
+    marking: bool,
 }
 
 #[derive(Clone)]
@@ -54,6 +56,8 @@ struct Arrow {
     color: Option<&'static str>,
     shorten_start: f64, // pt
     shorten_end: f64,
+    loop_bend: Option<f64>, // self-loop, bend degrees
+    out_angle: Option<f64>, // tikz out= departure angle
     warnings: Vec<String>,
 }
 
@@ -75,6 +79,8 @@ impl Arrow {
             color: None,
             shorten_start: 0.0,
             shorten_end: 0.0,
+            loop_bend: None,
+            out_angle: None,
             warnings: Vec::new(),
         }
     }
@@ -82,7 +88,15 @@ impl Arrow {
     fn final_mark(&self) -> String {
         if self.no_head {
             // `Rightarrow, no head` is the tikzcd idiom for a double line
-            return if self.mark == "=>" { "=".into() } else { "-".into() };
+            return if self.mark == "=>" {
+                "=".into()
+            } else if self.dotted {
+                "..".into()
+            } else if self.dashed {
+                "--".into()
+            } else {
+                "-".into()
+            };
         }
         if self.dashed && self.mark == "->" {
             "-->".into()
@@ -90,6 +104,8 @@ impl Arrow {
             "..>".into()
         } else if self.dashed && self.mark == "-" {
             "--".into()
+        } else if self.dotted && self.mark == "-" {
+            "..".into()
         } else {
             self.mark.clone()
         }
@@ -420,7 +436,11 @@ fn parse_label_mods(label: &mut Label, mods: &str) {
     for m in split_args(mods) {
         let m = m.trim();
         match m {
-            "description" | "anchor=center" | "marking" => label.side = Side::Center,
+            "description" => label.side = Side::Center,
+            "anchor=center" | "marking" => {
+                label.side = Side::Center;
+                label.marking = true;
+            }
             "swap" | "below" | "right" => label.side = Side::Right,
             "above" | "left" => {}
             "sloped" => label.sloped = true,
@@ -435,6 +455,9 @@ fn parse_label_mods(label: &mut Label, mods: &str) {
             }
             _ if m.starts_with("name=") => {
                 label.name = Some(m[5..].trim().to_string());
+            }
+            _ if m.starts_with("rotate=") => {
+                label.rotate = m[7..].trim().parse().ok();
             }
             _ => {} // rotate, shifts, fonts: cosmetic, ignore
         }
@@ -455,6 +478,8 @@ fn parse_label(part: &str) -> Option<Label> {
         pos: None,
         sloped: false,
         name: None,
+        rotate: None,
+        marking: false,
     };
     let rest: String = b[close + 1..].iter().collect();
     let mut rest = rest.trim().to_string();
@@ -529,6 +554,8 @@ fn parse_style(arrow: &mut Arrow, p: &str) {
             arrow.stroke_none = true;
             arrow.mark = "-".into();
         }
+        "loop" | "loop above" | "loop left" => arrow.loop_bend = Some(130.0),
+        "loop below" | "loop right" => arrow.loop_bend = Some(-130.0),
         "draw=none" => arrow.stroke_none = true,
         "crossing over" => arrow.crossing = true,
         _ => parse_style_kv(arrow, p),
@@ -574,8 +601,12 @@ fn parse_style_kv(arrow: &mut Arrow, p: &str) {
         if let Some(c) = named_color(v) {
             arrow.color = Some(c);
         }
+    } else if let Some(v) = norm.strip_prefix("out=") {
+        // keep the departure angle: it orients a bare out=/in= self-loop
+        arrow.out_angle = eval_angle(v);
     } else if norm.starts_with("linewidth")
-        || norm.starts_with("out=")
+        || norm.starts_with("distance=")
+        || norm.starts_with("looseness=")
         || norm.starts_with("in=")
         || norm.starts_with("startanchor")
         || norm.starts_with("endanchor")
@@ -588,6 +619,22 @@ fn parse_style_kv(arrow: &mut Arrow, p: &str) {
     } else if !p.is_empty() {
         arrow.warnings.push(p.to_string());
     }
+}
+
+/// Evaluate the simple angle arithmetic seen in the corpus (`180-50`).
+fn eval_angle(v: &str) -> Option<f64> {
+    let v = v.trim();
+    if v.is_empty() {
+        return None;
+    }
+    if let Some((a, b)) = v[1..].split_once('-') {
+        let head = &v[..1];
+        return Some(format!("{}{}", head, a).parse::<f64>().ok()? - b.trim().parse::<f64>().ok()?);
+    }
+    if let Some((a, b)) = v.split_once('+') {
+        return Some(a.trim().parse::<f64>().ok()? + b.trim().parse::<f64>().ok()?);
+    }
+    v.parse().ok()
 }
 
 fn len_pt(v: &str) -> f64 {
@@ -680,6 +727,8 @@ fn extract_arrows(cell: &str, r: i32, c: i32, arrows: &mut Vec<Arrow>) -> Result
                             pos: None,
                             sloped: false,
                             name: None,
+                            rotate: None,
+                            marking: false,
                         });
                     }
                     j = end;
@@ -734,6 +783,66 @@ fn spacing_from_opts(opts: &str) -> (f64, f64) {
         }
     }
     (col, row)
+}
+
+/// Estimated physical layout of the fletcher grid: column/row centers
+/// in pt, derived from spacing plus estimated node sizes, with linear
+/// interpolation for fractional (anchor) coordinates.
+struct PhysGrid {
+    xs: Vec<f64>,
+    ys: Vec<f64>,
+    colsp: f64,
+    rowsp: f64,
+}
+
+fn interp(cs: &[f64], step: f64, v: f64) -> f64 {
+    if cs.len() < 2 {
+        return v * step + cs.first().copied().unwrap_or(0.0);
+    }
+    let last = cs.len() - 1;
+    if v <= 0.0 {
+        return cs[0] + v * (cs[1] - cs[0]);
+    }
+    if v >= last as f64 {
+        return cs[last] + (v - last as f64) * (cs[last] - cs[last - 1]);
+    }
+    let i = v.floor() as usize;
+    cs[i] + (v - i as f64) * (cs[i + 1] - cs[i])
+}
+
+fn uninterp(cs: &[f64], step: f64, x: f64) -> f64 {
+    if cs.len() < 2 {
+        let base = cs.first().copied().unwrap_or(0.0);
+        return if step > 0.0 { (x - base) / step } else { 0.0 };
+    }
+    let last = cs.len() - 1;
+    if x <= cs[0] {
+        return (x - cs[0]) / (cs[1] - cs[0]);
+    }
+    if x >= cs[last] {
+        return last as f64 + (x - cs[last]) / (cs[last] - cs[last - 1]);
+    }
+    for i in 0..last {
+        if x <= cs[i + 1] {
+            return i as f64 + (x - cs[i]) / (cs[i + 1] - cs[i]);
+        }
+    }
+    last as f64
+}
+
+impl PhysGrid {
+    fn x(&self, c: f64) -> f64 {
+        interp(&self.xs, self.colsp, c)
+    }
+    fn y(&self, r: f64) -> f64 {
+        interp(&self.ys, self.rowsp, r)
+    }
+    fn rx(&self, x: f64) -> f64 {
+        uninterp(&self.xs, self.colsp, x)
+    }
+    fn ry(&self, y: f64) -> f64 {
+        uninterp(&self.ys, self.rowsp, y)
+    }
 }
 
 /// Crude rendered-width estimate (pt at 11pt math) for rail anchoring:
@@ -856,7 +965,16 @@ pub(crate) fn tikzcd_to_fletcher(src: &str) -> Result<(String, Vec<String>), Str
         return Err("empty".into());
     }
 
-    let (colsp, rowsp) = spacing_from_opts(&opts);
+    let (mut colsp, mut rowsp) = spacing_from_opts(&opts);
+    // tikzcd spacing is border-to-border: a diagram of bare arrows
+    // (all cells empty) still spreads; with no node sizes to add, our
+    // spacing IS the arrow length, so widen it
+    if nodes.iter().all(|(_, _, t)| {
+        t.trim_matches(|c: char| c.is_whitespace() || c == '{' || c == '}').is_empty()
+    }) {
+        colsp *= 2.2;
+        rowsp *= 2.0;
+    }
 
     // resolve name= anchors to points on their carrying arrow; a bent
     // carrier displaces the point sideways by the arc's sagitta
@@ -901,6 +1019,32 @@ pub(crate) fn tikzcd_to_fletcher(src: &str) -> Result<(String, Vec<String>), Str
         node_halfw.insert((*r, *c), est_halfwidth_pt(&clean_tex(tex)));
     }
 
+    let ncols = 1 + nodes.iter().map(|(_, c, _)| *c).max().unwrap_or(0).max(2) as usize;
+    let nrows = 1 + nodes.iter().map(|(r, _, _)| *r).max().unwrap_or(0).max(2) as usize;
+    let mut colw = vec![0.0f64; ncols];
+    let mut rowh = vec![0.0f64; nrows];
+    for ((r, c), hw) in &node_halfw {
+        if let Some(w) = colw.get_mut(*c as usize) {
+            *w = w.max(2.0 * hw);
+        }
+        if let Some(h) = rowh.get_mut(*r as usize) {
+            *h = h.max(14.0);
+        }
+    }
+    let centers = |sizes: &[f64], sp: f64| -> Vec<f64> {
+        let mut cs = vec![0.0];
+        for i in 1..sizes.len() {
+            cs.push(cs[i - 1] + sizes[i - 1] / 2.0 + sp + sizes[i] / 2.0);
+        }
+        cs
+    };
+    let grid = PhysGrid {
+        xs: centers(&colw, colsp),
+        ys: centers(&rowh, rowsp),
+        colsp,
+        rowsp,
+    };
+
     let mut lines: Vec<String> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
     for (r, c, tex) in &nodes {
@@ -916,34 +1060,60 @@ pub(crate) fn tikzcd_to_fletcher(src: &str) -> Result<(String, Vec<String>), Str
         let to = resolve(&a.to, &anchors).ok_or("unresolved-anchor")?;
         warnings.extend(a.warnings.iter().cloned());
 
-        // geometry adjustments, in pt space (x right, y down)
+        // geometry adjustments, in estimated physical space (x right,
+        // y down): fletcher auto-sizes columns, so uniform grid*spacing
+        // badly underestimates lengths next to wide nodes
         let is_anchor =
             matches!(a.from, Coord::Name(_)) || matches!(a.to, Coord::Name(_));
-        let (x1, y1) = (from.1 * colsp, from.0 * rowsp);
-        let (x2, y2) = (to.1 * colsp, to.0 * rowsp);
+        let (x1, y1) = (grid.x(from.1), grid.y(from.0));
+        let (x2, y2) = (grid.x(to.1), grid.y(to.0));
         let (dx, dy) = (x2 - x1, y2 - y1);
         let len = dx.hypot(dy);
-        if len < 0.01 && a.bend.is_none() {
-            continue; // degenerate (loops we can't draw); drop quietly
+        let mut loop_bend = a.loop_bend;
+        if len < 0.01 && loop_bend.is_none() {
+            if let Some(out) = a.out_angle {
+                // bare out=/in= on a stationary arrow is a self-loop
+                loop_bend = Some(if out.rem_euclid(360.0) < 180.0 { 130.0 } else { -130.0 });
+            }
+        }
+        if len < 0.01 && a.bend.is_none() && loop_bend.is_none() {
+            continue; // degenerate; drop quietly
         }
         let (mut xa, mut ya, mut xb, mut yb) = (x1, y1, x2, y2);
         let mut shift_arg = a.shift;
         let mut moved = false;
-        if is_anchor && len > 0.01 {
-            // 2-cells between arrows: honor shorten, keep clear of the
-            // carriers, and never collapse below a legible length
-            let mut s1 = a.shorten_start + 4.0;
-            let mut s2 = a.shorten_end + 4.0;
-            if len - s1 - s2 < 12.0 {
+        // per-endpoint clearance: anchors (2-cells onto arrows) stand
+        // off 6pt; empty cells 3.5pt so consecutive bare arrows don't
+        // fuse; node cells 0 — fletcher clips at the node border itself
+        let end_inset = |c: &Coord| -> f64 {
+            match c {
+                Coord::Name(_) => 6.0,
+                Coord::Cell(r, cc) => {
+                    if node_halfw.contains_key(&(*r, *cc)) {
+                        0.0
+                    } else {
+                        3.5
+                    }
+                }
+            }
+        };
+        if len > 0.01 {
+            let mut s1 = end_inset(&a.from)
+                + if matches!(a.from, Coord::Name(_)) { a.shorten_start } else { 0.0 };
+            let mut s2 = end_inset(&a.to)
+                + if matches!(a.to, Coord::Name(_)) { a.shorten_end } else { 0.0 };
+            if is_anchor && len - s1 - s2 < 12.0 {
                 let s = (len - 12.0) / 2.0;
                 s1 = s;
                 s2 = s;
             }
-            xa += dx / len * s1;
-            ya += dy / len * s1;
-            xb -= dx / len * s2;
-            yb -= dy / len * s2;
-            moved = true;
+            if s1 != 0.0 || s2 != 0.0 {
+                xa += dx / len * s1;
+                ya += dy / len * s1;
+                xb -= dx / len * s2;
+                yb -= dy / len * s2;
+                moved = true;
+            }
         }
         // arrows shifted beyond ~8pt detach from the nodes (adjoint-
         // triple rails); fletcher would draw a shifted center-to-center
@@ -987,7 +1157,7 @@ pub(crate) fn tikzcd_to_fletcher(src: &str) -> Result<(String, Vec<String>), Str
             }
         }
         let (from, to) = if moved {
-            ((ya / rowsp, xa / colsp), (yb / rowsp, xb / colsp))
+            ((grid.ry(ya), grid.rx(xa)), (grid.ry(yb), grid.rx(xb)))
         } else {
             (from, to)
         };
@@ -1015,8 +1185,8 @@ pub(crate) fn tikzcd_to_fletcher(src: &str) -> Result<(String, Vec<String>), Str
             })
             .collect();
         for l in &swapped {
-            if l.tex.trim().is_empty() {
-                continue; // pure name= anchor
+            if label_is_blank(&l.tex) {
+                continue; // pure name= anchor, possibly spelled "{\ }"
             }
             if first {
                 push_label_args(&mut args, l, a.stroke_none, a.color);
@@ -1025,7 +1195,7 @@ pub(crate) fn tikzcd_to_fletcher(src: &str) -> Result<(String, Vec<String>), Str
                 extra_labels.push(l);
             }
         }
-        if let Some(bend) = a.bend {
+        if let Some(bend) = a.bend.or(loop_bend) {
             args.push(format!("bend: {}deg", fmt_f(bend)));
         }
         if let Some(shift) = shift_arg {
@@ -1062,13 +1232,26 @@ pub(crate) fn tikzcd_to_fletcher(src: &str) -> Result<(String, Vec<String>), Str
     ))
 }
 
+/// Labels that are only spacing commands (`{\ }`, `\,`, `~`) exist to
+/// carry a name= anchor; rendering them would punch a blank hole in the
+/// carrier arrow's stroke.
+fn label_is_blank(tex: &str) -> bool {
+    let re = regex::Regex::new(r"^(\\[ ,;!:]|\\quad|\\qquad|~|\s|\{|\}|\\)*$").unwrap();
+    re.is_match(tex)
+}
+
 fn push_label_args(args: &mut Vec<String>, l: &Label, centered: bool, color: Option<&str>) {
     let fill = color.map(|c| format!("fill: {}, ", c)).unwrap_or_default();
-    args.push(format!(
-        "label: text(0.75em, {}mi({}))",
-        fill,
-        emit::ts(&clean_tex(&l.tex))
-    ));
+    let mut content = format!("mi({})", emit::ts(&clean_tex(&l.tex)));
+    if let Some(deg) = l.rotate {
+        // tikz rotates counterclockwise for positive angles, typst clockwise
+        content = format!("rotate({}deg, reflow: true, {})", fmt_f(-deg), content);
+    }
+    args.push(format!("label: text(0.75em, {}{})", fill, content));
+    if l.marking {
+        // ticks/bullets drawn on the stroke: don't crop the line
+        args.push("label-fill: none".into());
+    }
     let side = if centered && l.side == Side::Left {
         Side::Center
     } else {
