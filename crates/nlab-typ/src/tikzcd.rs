@@ -1288,12 +1288,10 @@ pub(crate) fn tikzcd_to_fletcher(src: &str) -> Result<(String, Vec<String>), Str
 
     // drop cells that render to nothing (pure \phantom spacers) BEFORE
     // deciding what the rail anchors below may attach to
-    let phantom_re = regex::Regex::new(r"\\[hv]?phantom\s*\{[^{}]*\}").unwrap();
     let nodes: Vec<(i32, i32, String)> = nodes
         .into_iter()
         .filter(|(_, _, tex)| {
-            let gauge = phantom_re.replace_all(&clean_tex(tex), "").to_string();
-            !gauge
+            !clean_tex(tex)
                 .trim_matches(|c: char| c.is_whitespace() || c == '{' || c == '}')
                 .is_empty()
         })
@@ -1327,6 +1325,62 @@ pub(crate) fn tikzcd_to_fletcher(src: &str) -> Result<(String, Vec<String>), Str
         let hh = node_halfh.get(&(*r, *c)).copied().unwrap_or(7.0);
         if let Some(h) = rowh.get_mut(*r as usize) {
             *h = h.max((2.0 * hh).max(10.0));
+        }
+    }
+
+    // tikzcd widens column separation so horizontal edge labels fit;
+    // fletcher doesn't, so pad middle columns with invisible spacers
+    let mut spacers: Vec<(i32, i32, f64)> = Vec::new();
+    {
+        let xs_now = {
+            let mut cs = vec![0.0];
+            for i in 1..colw.len() {
+                cs.push(cs[i - 1] + colw[i - 1] / 2.0 + colsp + colw[i] / 2.0);
+            }
+            cs
+        };
+        let mut extra: std::collections::HashMap<i32, f64> = std::collections::HashMap::new();
+        let mut extra_row: std::collections::HashMap<i32, i32> = std::collections::HashMap::new();
+        for a in &arrows {
+            let (Coord::Cell(r1, c1), Coord::Cell(r2, c2)) = (&a.from, &a.to) else {
+                continue;
+            };
+            if r1 != r2 || (c2 - c1).abs() < 2 {
+                continue;
+            }
+            let Some(l) = a.labels.iter().find(|l| {
+                !label_is_blank(&l.tex)
+                    && l.pos.map(|p| (0.15..=0.85).contains(&p)).unwrap_or(true)
+            }) else {
+                continue;
+            };
+            let lw = 2.0 * est_halfwidth_pt(&clean_tex(&l.tex)) * 0.75;
+            let (lo, hi) = (*c1.min(c2), *c1.max(c2));
+            let span = xs_now[hi as usize] - xs_now[lo as usize]
+                - colw[lo as usize] / 2.0
+                - colw[hi as usize] / 2.0;
+            let need = lw + 50.0;
+            if span < need {
+                let mids: Vec<i32> = ((lo + 1)..hi)
+                    .filter(|c| colw.get(*c as usize).copied().unwrap_or(0.0) < 1.0)
+                    .collect();
+                if !mids.is_empty() {
+                    let per = (need - span) / mids.len() as f64;
+                    for m in mids {
+                        let e = extra.entry(m).or_insert(0.0);
+                        if per > *e {
+                            *e = per;
+                            extra_row.insert(m, *r1);
+                        }
+                    }
+                }
+            }
+        }
+        for (c, w) in extra {
+            if let Some(cw) = colw.get_mut(c as usize) {
+                *cw = cw.max(w);
+            }
+            spacers.push((extra_row[&c], c, w));
         }
     }
 
@@ -1745,6 +1799,15 @@ pub(crate) fn tikzcd_to_fletcher(src: &str) -> Result<(String, Vec<String>), Str
         }
     }
 
+    for (r, c, w) in &spacers {
+        let er = *r as f64 + row_off.get(*r as usize).copied().unwrap_or(0.0);
+        lines.push(format!(
+            "  node(({}, {}), box(width: {}pt)),",
+            c,
+            fmt_f(er),
+            fmt_f(*w)
+        ));
+    }
     for (r, c) in &debug_dots {
         lines.push(format!(
             "  node(({}, {}), circle(radius: 1.4pt, fill: red)),",
@@ -1913,9 +1976,17 @@ fn clean_tex(s: &str) -> String {
     s = s.replace("\\textit", "\\mathit");
     s = s.replace("\\textsf", "\\mathsf");
     s = s.replace("\\texttt", "\\mathtt");
-    s = regex::Regex::new(r"\\[hv]?phantom\s*\{[^{}]*\}")
-        .unwrap()
-        .replace_all(&s, "")
+    let phantom_re = regex::Regex::new(r"\\([hv]?)phantom\s*\{([^{}]*)\}").unwrap();
+    s = phantom_re
+        .replace_all(&s, |c: &regex::Captures| {
+            if &c[1] == "v" {
+                return String::new();
+            }
+            // tikz authors use phantoms as width padding; translate to
+            // horizontal space of roughly the same width
+            let w = 2.0 * est_halfwidth_pt(&c[2]);
+            format!("\\hspace{{{}pt}}", fmt_f(w.max(2.0)))
+        })
         .to_string();
     s = s.replace("\\mbox", "\\text");
     s = s.replace("\\shortmid", "\\vert");
