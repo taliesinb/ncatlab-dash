@@ -67,6 +67,7 @@ fn extract_math(src: &str, stash: &mut Stash) -> String {
 }
 
 fn math_to_typst(tex: &str, display: bool) -> String {
+    let tex = &emit::fix_itex_builtins(tex);
     if display {
         if let Some(body) = emit::emit_formula_body(tex) {
             return format!(
@@ -75,7 +76,8 @@ fn math_to_typst(tex: &str, display: bool) -> String {
             );
         }
         // plain display math (arrays inside become matrices)
-        format!("#{}", emit::emit_equation_pub(tex).trim_end())
+        // emit_equation already includes the leading `#`
+        emit::emit_equation_pub(tex).trim_end().to_string()
     } else {
         format!("#mi({})", emit::ts(tex))
     }
@@ -284,10 +286,13 @@ fn markdown_to_typst(src: &str) -> String {
             Event::Start(Tag::BlockQuote(_)) => out.push_str("\n#quote(block: true)["),
             Event::End(TagEnd::BlockQuote(_)) => out.push_str("]\n"),
             Event::Start(Tag::Link { dest_url, .. }) => {
-                if let Some(anchor) = dest_url.strip_prefix('#') {
-                    out.push_str(&format!("#link(label(\"{}\"))[", anchor));
+                if dest_url.is_empty() {
+                    out.push_str("#[");
+                } else if let Some(anchor) = dest_url.strip_prefix('#') {
+                    out.push_str(&format!("#nlab-anchor(\"{}\")[", anchor));
                 } else {
-                    out.push_str(&format!("#link(\"{}\")[", dest_url));
+                    let dest = dest_url.replace('\\', "%5C").replace('"', "%22");
+                    out.push_str(&format!("#link(\"{}\")[", dest));
                 }
             }
             Event::End(TagEnd::Link) => out.push(']'),
@@ -338,9 +343,14 @@ const PAGE_PREAMBLE: &str = r##"#import "@local/mitex:0.2.7": mi-itex, mitex-ite
   let ms = query(label(id))
   if ms.len() > 0 and ms.first().func() == metadata and ms.first().value != none {
     link(label(id), ms.first().value)
-  } else {
+  } else if ms.len() > 0 {
     link(label(id))[(above)]
+  } else {
+    [(ref)]
   }
+}
+#let nlab-anchor(id, body) = context {
+  if query(label(id)).len() > 0 { link(label(id), body) } else { body }
 }
 "##;
 
@@ -393,19 +403,34 @@ pub(crate) fn page_to_typst(src: &str, title: Option<&str>) -> String {
             stash.put(format!("#nlab-ref(\"{}\")", &c[1]))
         })
         .to_string();
-    // Maruku anchor IALs: {#Id} standalone or inline
+    // Maruku anchor IALs: {#Id} standalone or inline; a repeated id
+    // would be a duplicate typst label, so only the first one anchors
     let anchor_re = regex::Regex::new(r"\{#([A-Za-z0-9:_-]+)\}").unwrap();
+    let mut seen_anchors = std::collections::HashSet::new();
     let src = anchor_re
         .replace_all(&src, |c: &regex::Captures| {
-            stash.put(format!("#metadata(none)#label(\"{}\")", &c[1]))
+            if seen_anchors.insert(c[1].to_string()) {
+                stash.put(format!("#metadata(none)#label(\"{}\")", &c[1]))
+            } else {
+                String::new()
+            }
         })
         .to_string();
     let body = markdown_to_typst(&src);
-    // resolve placeholders (escape pass never touches PUA chars)
-    let re = regex::Regex::new(&format!("{}(\\d+){}", P0, P1)).unwrap();
+    // resolve placeholders (escape pass never touches PUA chars); a
+    // literal ( or [ right after a #call() would chain as another
+    // argument list, so terminate the expression with `;` first
+    let re = regex::Regex::new(&format!("{}(\\d+){}([\\(\\[])?", P0, P1)).unwrap();
     let body = re
         .replace_all(&body, |c: &regex::Captures| {
-            stash.items[c[1].parse::<usize>().unwrap()].clone()
+            let item = &stash.items[c[1].parse::<usize>().unwrap()];
+            match c.get(2) {
+                Some(next) if item.ends_with(')') || item.ends_with(']') => {
+                    format!("{};{}", item, next.as_str())
+                }
+                Some(next) => format!("{}{}", item, next.as_str()),
+                None => item.clone(),
+            }
         })
         .to_string();
     let title_block = title

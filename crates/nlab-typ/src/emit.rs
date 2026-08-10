@@ -303,6 +303,44 @@ fn pipe_rule(tex: &str) -> String {
     out
 }
 
+/// itex2MML built-ins (and common author shorthands) that mitex's spec
+/// lacks. Applied only in the prose/tikzcd layer — never inside ts(),
+/// which must stay byte-identical to the Python pipeline.
+pub(crate) fn fix_itex_builtins(tex: &str) -> String {
+    const SUBS: &[(&str, &str)] = &[
+        ("id", "\\mathrm{id}"),
+        ("im", "\\mathrm{im}"),
+        ("dom", "\\mathrm{dom}"),
+        ("cod", "\\mathrm{cod}"),
+        ("coker", "\\mathrm{coker}"),
+        ("supp", "\\mathrm{supp}"),
+        ("len", "\\mathrm{len}"),
+        ("Map", "\\mathrm{Map}"),
+        ("Maps", "\\mathrm{Maps}"),
+        ("Hom", "\\mathrm{Hom}"),
+        ("colim", "\\mathrm{colim}"),
+        ("esh", "ʃ"),
+        ("qed", "∎"),
+        ("infinity", "\\infty"),
+        ("sslash", "⫽"),
+        ("product", "\\prod"),
+        ("swArrow", "⇙"),
+        ("seArrow", "⇘"),
+        ("neArrow", "⇗"),
+        ("nwArrow", "⇖"),
+    ];
+    let re = regex::Regex::new(r"\\([a-zA-Z]+)").unwrap();
+    re.replace_all(tex, |c: &regex::Captures| {
+        for (name, sub) in SUBS {
+            if &c[1] == *name {
+                return format!("{} ", sub);
+            }
+        }
+        c[0].to_string()
+    })
+    .to_string()
+}
+
 pub(crate) fn ts(tex: &str) -> String {
     let fixed = fix_tex(tex);
     format!("\"{}\"", fixed.replace('\\', "\\\\").replace('"', "\\\""))

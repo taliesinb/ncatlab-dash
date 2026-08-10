@@ -1333,7 +1333,7 @@ fn split_mbox(s: &str) -> String {
 
 /// Drop wrappers mitex has no handler for; keep their visible argument.
 fn clean_tex(s: &str) -> String {
-    let mut s = split_mbox(s);
+    let mut s = split_mbox(&emit::fix_itex_builtins(s));
     s = s.replace("\\mbox", "\\text");
     s = s.replace("\\shortmid", "\\vert");
     s = s.replace("\\\"", "\"");
