@@ -2,6 +2,7 @@
 mod emit;
 mod grid;
 mod prose;
+mod tikzcd;
 
 use std::io::Read;
 
@@ -41,6 +42,35 @@ fn main() {
             std::env::set_var("NLAB_LOCAL_MITEX", "1");
             let title = args.get(2).map(String::as_str);
             print!("{}", prose::page_to_typst(&input, title));
+        }
+        "tikzcd" => match tikzcd::tikzcd_to_fletcher(&input) {
+            Ok((code, warns)) => {
+                for w in warns {
+                    eprintln!("warn: ignored option {w:?}");
+                }
+                println!("{code}");
+            }
+            Err(e) => {
+                eprintln!("error: {e}");
+                std::process::exit(3);
+            }
+        },
+        "tikzcds" => {
+            use std::io::Write;
+            let out = std::io::stdout();
+            let mut out = out.lock();
+            for rec in input.split('\u{0}') {
+                if rec.trim().is_empty() {
+                    continue;
+                }
+                match tikzcd::tikzcd_to_fletcher(rec) {
+                    Ok((code, warns)) => {
+                        write!(out, "ok\u{1f}{}\u{1f}{}\u{0}", code, warns.join("\u{1e}"))
+                            .unwrap()
+                    }
+                    Err(e) => write!(out, "err:{e}\u{1f}\u{1f}\u{0}").unwrap(),
+                }
+            }
         }
         "typsts" => {
             use std::io::Write;

@@ -9,6 +9,7 @@
 //! ncatlab.org, fences into nlab-env blocks).
 
 use crate::emit;
+use crate::tikzcd;
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
 const P0: char = '\u{E000}'; // placeholder delimiters
@@ -355,6 +356,31 @@ pub(crate) fn page_to_typst(src: &str, title: Option<&str>) -> String {
         .collect::<Vec<_>>()
         .join("\n");
     let src = src.replace("\\tableofcontents", &stash.put("#outline(depth: 2)".into()));
+    // raw tikzcd blocks (the live site renders these server-side)
+    let tikz_re =
+        regex::Regex::new(r"(?s)\\begin\{tikzcd\}.*?\\end\{tikzcd\}").unwrap();
+    let src = tikz_re
+        .replace_all(&src, |c: &regex::Captures| {
+            match tikzcd::tikzcd_to_fletcher(&c[0]) {
+                Ok((code, _)) => stash.put(format!(
+                    "#align(center, block(breakable: false)[\n{}])",
+                    code.trim_end()
+                )),
+                Err(_) => c[0].to_string(),
+            }
+        })
+        .to_string();
+    // raw proof/environment wrappers in prose (as opposed to +-- fences)
+    let src = regex::Regex::new(r"\\begin\{proof\}")
+        .unwrap()
+        .replace_all(&src, |_: &regex::Captures| {
+            stash.put("#nlab-env(\"Proof\", \"proof\")[".into())
+        })
+        .to_string();
+    let src = regex::Regex::new(r"\\end\{proof\}")
+        .unwrap()
+        .replace_all(&src, |_: &regex::Captures| stash.put("]".into()))
+        .to_string();
     let src = extract_math(&src, &mut stash);
     let src = extract_fences(&src, &mut stash);
     let src = extract_wiki(&src, &mut stash);
