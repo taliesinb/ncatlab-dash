@@ -346,6 +346,47 @@ pub(crate) fn ts(tex: &str) -> String {
     format!("\"{}\"", fixed.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
+/// Rewrite `mi("...")` / `#mitex("...")` calls in emitted code into
+/// native typst math (`$...$` / `$ ... $`) by running the fork's
+/// converter offline — the exact code path the wasm plugin would run at
+/// compile time, so rendering is identical. Conversion failures keep
+/// the plugin call as a fallback.
+pub(crate) fn nativize_calls(code: &str) -> String {
+    let re =
+        regex::Regex::new(r#"(#?)\b(mi|mitex)\("((?:[^"\\]|\\.)*)"\)"#).unwrap();
+    re.replace_all(code, |c: &regex::Captures| {
+        let tex = unescape_str(&c[3]);
+        match mitex::convert_math_itex(&tex, None) {
+            Ok(res) if !res.trim().is_empty() => {
+                let res = res.trim().replace('\n', " ");
+                if &c[2] == "mitex" {
+                    format!("$ {} $", res) // display/block math
+                } else {
+                    format!("${}$", res)
+                }
+            }
+            _ => c[0].to_string(),
+        }
+    })
+    .to_string()
+}
+
+fn unescape_str(s: &str) -> String {
+    let mut out = String::new();
+    let b: Vec<char> = s.chars().collect();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == '\\' && i + 1 < b.len() {
+            out.push(b[i + 1]);
+            i += 2;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
 // -------------------------------------------------------------- tables
 
 fn mark_for(dir: &str) -> &'static str {

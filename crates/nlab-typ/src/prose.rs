@@ -317,8 +317,62 @@ fn markdown_to_typst(src: &str) -> String {
 
 // ------------------------------------------------------------ assembly
 
-const PAGE_PREAMBLE: &str = r##"#import "@local/mitex:0.2.7": mi-itex, mitex-itex
+const PAGE_PREAMBLE: &str = r##"#import "@local/mitex:0.2.7": mi-itex, mitex-itex, mitex-scope
 #import "@preview/fletcher:0.5.8": diagram, node, edge
+// natively-emitted math calls the same helpers the mitex plugin's eval
+// scope provides; bind the ones the converter can reference
+#let mitexdisplay = mitex-scope.at("mitexdisplay")
+#let mitexinline = mitex-scope.at("mitexinline")
+#let mitexmathbf = mitex-scope.at("mitexmathbf")
+#let mitexupright = mitex-scope.at("mitexupright")
+#let mitexitalic = mitex-scope.at("mitexitalic")
+#let mitexsans = mitex-scope.at("mitexsans")
+#let mitexfrak = mitex-scope.at("mitexfrak")
+#let mitexmono = mitex-scope.at("mitexmono")
+#let mitexsqrt = mitex-scope.at("mitexsqrt")
+#let mitexset = mitex-scope.at("mitexset")
+#let mitexnot = mitex-scope.at("mitexnot")
+#let mitexscript = mitex-scope.at("mitexscript")
+#let mitexsscript = mitex-scope.at("mitexsscript")
+#let mitexarray = mitex-scope.at("mitexarray")
+#let mitexlabel = mitex-scope.at("mitexlabel")
+#let mitexoverbrace = mitex-scope.at("mitexoverbrace")
+#let mitexunderbrace = mitex-scope.at("mitexunderbrace")
+#let mitexoverbracket = mitex-scope.at("mitexoverbracket")
+#let mitexunderbracket = mitex-scope.at("mitexunderbracket")
+#let mitexcomment = mitex-scope.at("mitexcomment")
+#let scope-or(name, fallback) = if name in mitex-scope { mitex-scope.at(name) } else { fallback }
+#let xarrow = scope-or("xarrow", none)
+#let operatorname = scope-or("operatorname", none)
+#let operatornamewithlimits = scope-or("operatornamewithlimits", none)
+#let underset = scope-or("underset", none)
+#let overset = scope-or("overset", none)
+#let underoverset = scope-or("underoverset", none)
+#let stackrel = scope-or("stackrel", none)
+#let textmath = scope-or("textmath", none)
+#let big = scope-or("big", none)
+#let Big = scope-or("Big", none)
+#let bigg = scope-or("bigg", none)
+#let Bigg = scope-or("Bigg", none)
+#let aligned = scope-or("aligned", none)
+#let matrix = scope-or("matrix", none)
+#let pmatrix = scope-or("pmatrix", none)
+#let bmatrix = scope-or("bmatrix", none)
+#let Bmatrix = scope-or("Bmatrix", none)
+#let vmatrix = scope-or("vmatrix", none)
+#let Vmatrix = scope-or("Vmatrix", none)
+#let smallmatrix = scope-or("smallmatrix", none)
+#let substack = scope-or("substack", none)
+#let cases = scope-or("cases", std.math.cases)
+#let atop = scope-or("atop", none)
+#let negthinspace = scope-or("negthinspace", none)
+#let mitexcite = scope-or("mitexcite", none)
+#let tfrac = scope-or("tfrac", none)
+#let dfrac = scope-or("dfrac", none)
+#let mathsf = scope-or("mathsf", none)
+#let mathscr = scope-or("mathscr", none)
+#let mathrm = scope-or("mathrm", none)
+#let mathit = scope-or("mathit", none)
 #set page(width: 17cm, height: 25cm, margin: 1.6cm, fill: white, numbering: "1")
 #set text(10.5pt)
 #set heading(numbering: "1.")
@@ -441,5 +495,6 @@ pub(crate) fn page_to_typst(src: &str, title: Option<&str>) -> String {
             )
         })
         .unwrap_or_default();
-    emit::localize_calls(format!("{}\n{}{}\n", PAGE_PREAMBLE, title_block, body))
+    let body = emit::nativize_calls(&format!("{}{}\n", title_block, body));
+    emit::localize_calls(format!("{}\n{}", PAGE_PREAMBLE, body))
 }

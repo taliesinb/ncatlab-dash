@@ -7,6 +7,7 @@ edition = "2021"
 [dependencies]
 # Local checkout of our mitex fork (github.com/taliesinb/mitex),
 # expected as a sibling of this repository at ~/github/mitex.
+mitex = { path = "../../../mitex/crates/mitex" }
 mitex-parser = { path = "../../../mitex/crates/mitex-parser" }
 mitex-spec-gen = { path = "../../../mitex/crates/mitex-spec-gen" }
 rowan = "0.15.15"
