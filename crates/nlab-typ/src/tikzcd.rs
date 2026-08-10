@@ -47,9 +47,13 @@ struct Arrow {
     dashed: bool,
     dotted: bool,
     bend: Option<f64>,
-    shift: Option<String>,
+    shift: Option<f64>, // pt, positive = left of travel
     crossing: bool,
     swap: bool,
+    no_head: bool,
+    color: Option<&'static str>,
+    shorten_start: f64, // pt
+    shorten_end: f64,
     warnings: Vec<String>,
 }
 
@@ -67,11 +71,19 @@ impl Arrow {
             shift: None,
             crossing: false,
             swap: false,
+            no_head: false,
+            color: None,
+            shorten_start: 0.0,
+            shorten_end: 0.0,
             warnings: Vec::new(),
         }
     }
 
     fn final_mark(&self) -> String {
+        if self.no_head {
+            // `Rightarrow, no head` is the tikzcd idiom for a double line
+            return if self.mark == "=>" { "=".into() } else { "-".into() };
+        }
         if self.dashed && self.mark == "->" {
             "-->".into()
         } else if self.dotted && self.mark == "->" {
@@ -199,14 +211,30 @@ fn split_top(s: &str, rows: bool) -> Vec<String> {
         }
         if c == '\\' && starts(i, "\\begin{") {
             env += 1;
-            cur.push_str("\\begin{");
             i += 7;
+            cur.push_str("\\begin{");
+            while i < b.len() && b[i] != '}' {
+                cur.push(b[i]);
+                i += 1;
+            }
+            if i < b.len() {
+                cur.push('}');
+                i += 1;
+            }
             continue;
         }
         if c == '\\' && starts(i, "\\end{") {
             env -= 1;
-            cur.push_str("\\end{");
             i += 5;
+            cur.push_str("\\end{");
+            while i < b.len() && b[i] != '}' {
+                cur.push(b[i]);
+                i += 1;
+            }
+            if i < b.len() {
+                cur.push('}');
+                i += 1;
+            }
             continue;
         }
         if env > 0 {
@@ -442,19 +470,24 @@ fn parse_label(part: &str) -> Option<Label> {
     Some(label)
 }
 
-fn parse_arrow_args(arrow: &mut Arrow, args: &str, r: i32, c: i32) {
+/// Returns whether any positioning token (direction, from=, to=) was seen.
+fn parse_arrow_args(arrow: &mut Arrow, args: &str, r: i32, c: i32) -> bool {
     let dir_re = |s: &str| !s.is_empty() && s.chars().all(|c| "lrud".contains(c));
+    let mut positioned = false;
     for part in split_args(args) {
         let p = part.trim();
         if dir_re(p) {
+            positioned = true;
             apply_dir(arrow, p, r, c);
         } else if let Some(v) = p.strip_prefix("from=") {
+            positioned = true;
             arrow.from = if dir_re(v.trim()) {
                 rel_coord(v.trim(), r, c)
             } else {
                 parse_coord(v)
             };
         } else if let Some(v) = p.strip_prefix("to=") {
+            positioned = true;
             arrow.to = if dir_re(v.trim()) {
                 rel_coord(v.trim(), r, c)
             } else {
@@ -470,6 +503,7 @@ fn parse_arrow_args(arrow: &mut Arrow, args: &str, r: i32, c: i32) {
             parse_style(arrow, p);
         }
     }
+    positioned
 }
 
 fn parse_style(arrow: &mut Arrow, p: &str) {
@@ -477,7 +511,8 @@ fn parse_style(arrow: &mut Arrow, p: &str) {
         "Rightarrow" => arrow.mark = "=>".into(),
         "Leftarrow" => arrow.mark = "<=".into(),
         "Leftrightarrow" => arrow.mark = "<=>".into(),
-        "-" | "no head" | "dash" => arrow.mark = "-".into(),
+        "-" | "dash" => arrow.mark = "-".into(),
+        "no head" => arrow.no_head = true,
         "equals" | "equal" | "Equal" => arrow.mark = "=".into(),
         "->>" | "two heads" | "twoheadrightarrow" => arrow.mark = "->>".into(),
         ">->" | "tail" | "rightarrowtail" => arrow.mark = ">->".into(),
@@ -500,6 +535,21 @@ fn parse_style(arrow: &mut Arrow, p: &str) {
     }
 }
 
+fn named_color(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "red" => "red",
+        "blue" => "blue",
+        "green" => "green",
+        "olive" => "olive",
+        "orange" => "orange",
+        "purple" | "violet" => "purple",
+        "teal" | "cyan" => "teal",
+        "gray" | "grey" | "lightgray" | "lightgrey" | "darkgray" => "gray",
+        "brown" => "maroon",
+        _ => return None,
+    })
+}
+
 fn parse_style_kv(arrow: &mut Arrow, p: &str) {
     let norm = p.replace(' ', "");
     if let Some(v) = norm.strip_prefix("bendleft") {
@@ -508,24 +558,31 @@ fn parse_style_kv(arrow: &mut Arrow, p: &str) {
         arrow.bend =
             Some(-v.strip_prefix('=').and_then(|x| x.parse::<f64>().ok()).unwrap_or(30.0));
     } else if let Some(v) = norm.strip_prefix("shiftleft") {
-        arrow.shift = Some(shift_len(v, 1.0));
+        arrow.shift = Some(shift_len(v));
     } else if let Some(v) = norm.strip_prefix("shiftright") {
-        arrow.shift = Some(shift_len(v, -1.0));
-    } else if norm.starts_with("shorten")
-        || norm.starts_with("linewidth")
+        arrow.shift = Some(-shift_len(v));
+    } else if let Some(v) = norm.strip_prefix("shorten<=") {
+        arrow.shorten_start = len_pt(v);
+    } else if let Some(v) = norm.strip_prefix("shorten>=") {
+        arrow.shorten_end = len_pt(v);
+    } else if let Some(v) = norm.strip_prefix("shorten=") {
+        arrow.shorten_start = len_pt(v);
+        arrow.shorten_end = len_pt(v);
+    } else if let Some(c) = named_color(norm.as_str()) {
+        arrow.color = Some(c);
+    } else if let Some(v) = norm.strip_prefix("color=") {
+        if let Some(c) = named_color(v) {
+            arrow.color = Some(c);
+        }
+    } else if norm.starts_with("linewidth")
         || norm.starts_with("out=")
         || norm.starts_with("in=")
         || norm.starts_with("startanchor")
         || norm.starts_with("endanchor")
-        || norm.starts_with("color=")
         || norm.starts_with("opacity=")
         || norm.starts_with("draw=")
         || norm.starts_with("nodes=")
-        || matches!(
-            norm.as_str(),
-            "thick" | "thin" | "roundedcorners" | "gray" | "grey" | "blue" | "red" | "olive"
-                | "green" | "orange" | "purple" | "controls"
-        )
+        || matches!(norm.as_str(), "thick" | "thin" | "roundedcorners" | "controls" | "white")
     {
         // cosmetic / path-shaping options with no fletcher analogue
     } else if !p.is_empty() {
@@ -533,16 +590,31 @@ fn parse_style_kv(arrow: &mut Arrow, p: &str) {
     }
 }
 
-fn shift_len(v: &str, sign: f64) -> String {
-    let v = v.strip_prefix('=').unwrap_or("").trim();
+fn len_pt(v: &str) -> f64 {
     let num: String = v
         .chars()
         .take_while(|c| c.is_ascii_digit() || *c == '.' || *c == '-')
         .collect();
-    let n: f64 = num.parse().unwrap_or(3.0);
-    let n = if v.ends_with("ex") { n * 4.3 } else { n };
-    let n = n.clamp(1.0, 20.0);
-    format!("{}pt", fmt_f(sign * n))
+    let n: f64 = num.parse().unwrap_or(0.0);
+    if v.ends_with("ex") {
+        n * 4.3
+    } else if v.ends_with("em") {
+        n * 10.0
+    } else if v.ends_with("cm") {
+        n * 28.35
+    } else if v.ends_with("mm") {
+        n * 2.835
+    } else {
+        n
+    }
+}
+
+fn shift_len(v: &str) -> f64 {
+    let v = v.strip_prefix('=').unwrap_or("").trim();
+    if v.is_empty() {
+        return 3.0;
+    }
+    len_pt(v).clamp(1.0, 30.0)
 }
 
 // --------------------------------------------------------- cell parsing
@@ -571,41 +643,50 @@ fn extract_arrows(cell: &str, r: i32, c: i32, arrows: &mut Vec<Arrow>) -> Result
             j += 1;
         }
         let mut arrow = Arrow::at(r, c);
+        let mut positioned = false;
+        let mut had_bracket = false;
         if let Some((args, end)) = read_group(&b, j, '[', ']') {
-            parse_arrow_args(&mut arrow, &args, r, c);
-            j = end;
-        } else if let Some((dir, end)) = read_group(&b, j, '{', '}') {
-            // old style: \ar{dir}[mods]{label}
-            apply_dir(&mut arrow, dir.trim(), r, c);
+            positioned = parse_arrow_args(&mut arrow, &args, r, c);
+            had_bracket = true;
             j = end;
             while j < b.len() && b[j].is_whitespace() {
                 j += 1;
             }
-            let mut side = Side::Left;
-            if let Some((mods, end)) = read_group(&b, j, '[', ']') {
-                if mods.contains("swap") {
-                    side = Side::Right;
-                }
+        }
+        if !positioned {
+            // old style: \ar{dir}[mods]{label}, or hybrid \ar[mapsto]{r}
+            if let Some((dir, end)) = read_group(&b, j, '{', '}') {
+                apply_dir(&mut arrow, dir.trim(), r, c);
                 j = end;
                 while j < b.len() && b[j].is_whitespace() {
                     j += 1;
                 }
-            }
-            if let Some((tex, end)) = read_group(&b, j, '{', '}') {
-                let tex = strip_braces(&tex).to_string();
-                if !tex.trim().is_empty() {
-                    arrow.labels.push(Label {
-                        tex,
-                        side,
-                        pos: None,
-                        sloped: false,
-                        name: None,
-                    });
+                let mut side = Side::Left;
+                if let Some((mods, end)) = read_group(&b, j, '[', ']') {
+                    if mods.contains("swap") {
+                        side = Side::Right;
+                    }
+                    j = end;
+                    while j < b.len() && b[j].is_whitespace() {
+                        j += 1;
+                    }
                 }
-                j = end;
+                if let Some((tex, end)) = read_group(&b, j, '{', '}') {
+                    let tex = strip_braces(&tex).to_string();
+                    if !tex.trim().is_empty() {
+                        arrow.labels.push(Label {
+                            tex,
+                            side,
+                            pos: None,
+                            sloped: false,
+                            name: None,
+                        });
+                    }
+                    j = end;
+                }
+            } else if !had_bracket {
+                return Err("ar-without-args".into());
             }
-        } else {
-            return Err("ar-without-args".into());
         }
         arrows.push(arrow);
         i = j;
@@ -615,7 +696,7 @@ fn extract_arrows(cell: &str, r: i32, c: i32, arrows: &mut Vec<Arrow>) -> Result
 
 // ------------------------------------------------------------- options
 
-fn spacing_from_opts(opts: &str) -> (String, String) {
+fn spacing_from_opts(opts: &str) -> (f64, f64) {
     // defaults match the array emitter's diagram spacing
     let (mut col, mut row) = (2.6f64 * 11.0, 2.2 * 11.0); // in pt (11pt em)
     for tok in split_args(opts) {
@@ -652,7 +733,7 @@ fn spacing_from_opts(opts: &str) -> (String, String) {
             row = apply(v, row);
         }
     }
-    (format!("{}pt", fmt_f(col)), format!("{}pt", fmt_f(row)))
+    (col, row)
 }
 
 // -------------------------------------------------------------- output
@@ -728,23 +809,32 @@ pub(crate) fn tikzcd_to_fletcher(src: &str) -> Result<(String, Vec<String>), Str
         return Err("empty".into());
     }
 
-    // resolve name= anchors to points on their carrying arrow
+    let (colsp, rowsp) = spacing_from_opts(&opts);
+
+    // resolve name= anchors to points on their carrying arrow; a bent
+    // carrier displaces the point sideways by the arc's sagitta
     let mut anchors = std::collections::HashMap::new();
     for a in &arrows {
         for l in &a.labels {
             if let Some(name) = &l.name {
                 if let (Some(f), Some(t)) = (resolve(&a.from, &anchors), resolve(&a.to, &anchors)) {
                     let t01 = l.pos.unwrap_or(0.5);
-                    anchors.insert(
-                        name.clone(),
-                        (f.0 + t01 * (t.0 - f.0), f.1 + t01 * (t.1 - f.1)),
-                    );
+                    let mut p = (f.0 + t01 * (t.0 - f.0), f.1 + t01 * (t.1 - f.1));
+                    if let Some(bend) = a.bend {
+                        // pt-space chord and its left normal
+                        let (dx, dy) = ((t.1 - f.1) * colsp, (t.0 - f.0) * rowsp);
+                        let len = dx.hypot(dy).max(1.0);
+                        let th = bend.to_radians();
+                        let sag = len * (1.0 - th.cos()).abs() / (2.0 * th.sin().abs().max(0.05));
+                        let sag = sag * bend.signum();
+                        let (nx, ny) = (dy / len, -dx / len);
+                        p = (p.0 + ny * sag / rowsp, p.1 + nx * sag / colsp);
+                    }
+                    anchors.insert(name.clone(), p);
                 }
             }
         }
     }
-
-    let (colsp, rowsp) = spacing_from_opts(&opts);
     let mut lines: Vec<String> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
     for (r, c, tex) in &nodes {
@@ -766,6 +856,57 @@ pub(crate) fn tikzcd_to_fletcher(src: &str) -> Result<(String, Vec<String>), Str
         let from = resolve(&a.from, &anchors).ok_or("unresolved-anchor")?;
         let to = resolve(&a.to, &anchors).ok_or("unresolved-anchor")?;
         warnings.extend(a.warnings.iter().cloned());
+
+        // geometry adjustments, in pt space (x right, y down)
+        let is_anchor =
+            matches!(a.from, Coord::Name(_)) || matches!(a.to, Coord::Name(_));
+        let (x1, y1) = (from.1 * colsp, from.0 * rowsp);
+        let (x2, y2) = (to.1 * colsp, to.0 * rowsp);
+        let (dx, dy) = (x2 - x1, y2 - y1);
+        let len = dx.hypot(dy);
+        if len < 0.01 && a.bend.is_none() {
+            continue; // degenerate (loops we can't draw); drop quietly
+        }
+        let (mut xa, mut ya, mut xb, mut yb) = (x1, y1, x2, y2);
+        let mut shift_arg = a.shift;
+        let mut moved = false;
+        if is_anchor && len > 0.01 {
+            // 2-cells between arrows: honor shorten, keep clear of the
+            // carriers, and never collapse below a legible length
+            let mut s1 = a.shorten_start + 4.0;
+            let mut s2 = a.shorten_end + 4.0;
+            if len - s1 - s2 < 12.0 {
+                let s = (len - 12.0) / 2.0;
+                s1 = s;
+                s2 = s;
+            }
+            xa += dx / len * s1;
+            ya += dy / len * s1;
+            xb -= dx / len * s2;
+            yb -= dy / len * s2;
+            moved = true;
+        }
+        if let Some(sh) = shift_arg {
+            let axis = from.0 == to.0 || from.1 == to.1;
+            if axis && sh.abs() > 8.0 && len > 0.01 {
+                // a rail detached from the nodes (adjoint-triple style);
+                // fletcher would draw a shifted center-to-center line
+                let (nx, ny) = (dy / len, -dx / len);
+                let inset = (len * 0.2).min(14.0);
+                xa += nx * sh + dx / len * inset;
+                ya += ny * sh + dy / len * inset;
+                xb += nx * sh - dx / len * inset;
+                yb += ny * sh - dy / len * inset;
+                shift_arg = None;
+                moved = true;
+            }
+        }
+        let (from, to) = if moved {
+            ((ya / rowsp, xa / colsp), (yb / rowsp, xb / colsp))
+        } else {
+            (from, to)
+        };
+
         let mut args = vec![
             coord_str(from),
             coord_str(to),
@@ -793,7 +934,7 @@ pub(crate) fn tikzcd_to_fletcher(src: &str) -> Result<(String, Vec<String>), Str
                 continue; // pure name= anchor
             }
             if first {
-                push_label_args(&mut args, l, a.stroke_none);
+                push_label_args(&mut args, l, a.stroke_none, a.color);
                 first = false;
             } else {
                 extra_labels.push(l);
@@ -802,19 +943,21 @@ pub(crate) fn tikzcd_to_fletcher(src: &str) -> Result<(String, Vec<String>), Str
         if let Some(bend) = a.bend {
             args.push(format!("bend: {}deg", fmt_f(bend)));
         }
-        if let Some(shift) = &a.shift {
-            args.push(format!("shift: {}", shift));
+        if let Some(shift) = shift_arg {
+            args.push(format!("shift: {}pt", fmt_f(shift)));
         }
         if a.crossing {
             args.push("crossing: true".into());
         }
         if a.stroke_none {
             args.push("stroke: none".into());
+        } else if let Some(c) = a.color {
+            args.push(format!("stroke: {}", c));
         }
         lines.push(format!("  edge({}),", args.join(", ")));
         for l in extra_labels {
             let mut args = vec![coord_str(from), coord_str(to), "\"-\"".to_string()];
-            push_label_args(&mut args, l, true);
+            push_label_args(&mut args, l, true, a.color);
             if let Some(bend) = a.bend {
                 args.push(format!("bend: {}deg", fmt_f(bend)));
             }
@@ -825,18 +968,20 @@ pub(crate) fn tikzcd_to_fletcher(src: &str) -> Result<(String, Vec<String>), Str
 
     Ok((
         format!(
-            "#diagram(\n  spacing: ({}, {}),\n{}\n)\n",
-            colsp,
-            rowsp,
+            "#diagram(\n  spacing: ({}pt, {}pt),\n{}\n)\n",
+            fmt_f(colsp),
+            fmt_f(rowsp),
             lines.join("\n")
         ),
         warnings,
     ))
 }
 
-fn push_label_args(args: &mut Vec<String>, l: &Label, centered: bool) {
+fn push_label_args(args: &mut Vec<String>, l: &Label, centered: bool, color: Option<&str>) {
+    let fill = color.map(|c| format!("fill: {}, ", c)).unwrap_or_default();
     args.push(format!(
-        "label: text(0.75em, mi({}))",
+        "label: text(0.75em, {}mi({}))",
+        fill,
         emit::ts(&clean_tex(&l.tex))
     ));
     let side = if centered && l.side == Side::Left {
@@ -867,9 +1012,51 @@ pub(crate) fn normalize_shortcuts(src: &str) -> String {
     re.replace_all(src, "\\ar{$1}").to_string()
 }
 
+/// `\mbox{$B_2$ Kan complex}` -> `B_2 \text{ Kan complex}`: text-mode
+/// boxes with embedded inline math become alternating text/math runs.
+fn split_mbox(s: &str) -> String {
+    let mut s = s.to_string();
+    for cmd in ["\\mbox", "\\text"] {
+        let mut from = 0;
+        while let Some(rel) = s[from..].find(cmd) {
+            let pos = from + rel;
+            let b: Vec<char> = s[pos + cmd.len()..].chars().collect();
+            let mut k = 0;
+            while k < b.len() && b[k].is_whitespace() {
+                k += 1;
+            }
+            let Some((inner, end)) = read_group(&b, k, '{', '}') else {
+                from = pos + cmd.len();
+                continue;
+            };
+            if !inner.contains('$') {
+                from = pos + cmd.len();
+                continue;
+            }
+            let mut out = String::new();
+            for (i, seg) in inner.split('$').enumerate() {
+                if seg.is_empty() {
+                    continue;
+                }
+                if i % 2 == 1 {
+                    out.push_str(seg); // math run
+                } else {
+                    out.push_str(&format!("\\text{{{}}}", seg));
+                }
+                out.push(' ');
+            }
+            let tail: String = b[end..].iter().collect();
+            s = format!("{}{}{}", &s[..pos], out.trim_end(), tail);
+            from = pos;
+        }
+    }
+    s
+}
+
 /// Drop wrappers mitex has no handler for; keep their visible argument.
 fn clean_tex(s: &str) -> String {
-    let mut s = s.replace("\\mbox", "\\text");
+    let mut s = split_mbox(s);
+    s = s.replace("\\mbox", "\\text");
     s = s.replace("\\shortmid", "\\vert");
     s = s.replace("\\\"", "\"");
     s = s.replace("\\rmfamily", "");
