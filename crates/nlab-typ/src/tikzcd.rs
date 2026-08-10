@@ -546,7 +546,7 @@ fn parse_style(arrow: &mut Arrow, p: &str) {
         "mapsto" | "maps to" | "|->" => arrow.mark = "|->".into(),
         "<-|" => arrow.mark = "<-|".into(),
         "<-" => arrow.mark = "<-".into(),
-        "<->" => arrow.mark = "<->".into(),
+        "<->" | "leftrightarrow" => arrow.mark = "<->".into(),
         "-->" | "dashrightarrow" => arrow.dashed = true,
         "dashed" => arrow.dashed = true,
         "dotted" => arrow.dotted = true,
@@ -708,30 +708,40 @@ fn extract_arrows(cell: &str, r: i32, c: i32, arrows: &mut Vec<Arrow>) -> Result
                 while j < b.len() && b[j].is_whitespace() {
                     j += 1;
                 }
+                // any number of [mods]{label} pairs may follow the
+                // direction: \ar{dl}{Sp}[swap]{\perp}
                 let mut side = Side::Left;
-                if let Some((mods, end)) = read_group(&b, j, '[', ']') {
-                    if mods.contains("swap") {
-                        side = Side::Right;
-                    }
-                    j = end;
+                loop {
                     while j < b.len() && b[j].is_whitespace() {
                         j += 1;
                     }
-                }
-                if let Some((tex, end)) = read_group(&b, j, '{', '}') {
-                    let tex = strip_braces(&tex).to_string();
-                    if !tex.trim().is_empty() {
-                        arrow.labels.push(Label {
-                            tex,
-                            side,
-                            pos: None,
-                            sloped: false,
-                            name: None,
-                            rotate: None,
-                            marking: false,
-                        });
+                    if let Some((mods, end)) = read_group(&b, j, '[', ']') {
+                        side = if mods.contains("swap") {
+                            Side::Right
+                        } else {
+                            Side::Left
+                        };
+                        j = end;
+                        continue;
                     }
-                    j = end;
+                    if let Some((tex, end)) = read_group(&b, j, '{', '}') {
+                        let tex = strip_braces(&tex).to_string();
+                        if !tex.trim().is_empty() {
+                            arrow.labels.push(Label {
+                                tex,
+                                side,
+                                pos: None,
+                                sloped: false,
+                                name: None,
+                                rotate: None,
+                                marking: false,
+                            });
+                        }
+                        j = end;
+                        side = Side::Right;
+                        continue;
+                    }
+                    break;
                 }
             } else if !had_bracket {
                 return Err("ar-without-args".into());
