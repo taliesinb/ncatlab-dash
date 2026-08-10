@@ -1328,6 +1328,33 @@ pub(crate) fn tikzcd_to_fletcher(src: &str) -> Result<(String, Vec<String>), Str
         }
     }
 
+    // adjunction pairs (a 2-cell between two parallel arrows over the
+    // same node pair) need room for the turnstile between short arrows
+    {
+        let named: Vec<&Arrow> = arrows
+            .iter()
+            .filter(|a| a.labels.iter().any(|l| l.name.is_some()))
+            .collect();
+        let mut pair = false;
+        for (i, a) in named.iter().enumerate() {
+            for b in named.iter().skip(i + 1) {
+                if let (Coord::Cell(ar1, ac1), Coord::Cell(ar2, ac2),
+                        Coord::Cell(br1, bc1), Coord::Cell(br2, bc2)) =
+                    (&a.from, &a.to, &b.from, &b.to)
+                {
+                    let same = (ar1, ac1, ar2, ac2) == (br1, bc1, br2, bc2)
+                        || (ar1, ac1, ar2, ac2) == (br2, bc2, br1, bc1);
+                    if same && ar1 == ar2 {
+                        pair = true;
+                    }
+                }
+            }
+        }
+        if pair {
+            colsp = colsp.max(44.0);
+        }
+    }
+
     // tikzcd widens column separation so horizontal edge labels fit;
     // fletcher doesn't, so pad middle columns with invisible spacers
     let mut spacers: Vec<(i32, i32, f64)> = Vec::new();
@@ -1474,9 +1501,30 @@ pub(crate) fn tikzcd_to_fletcher(src: &str) -> Result<(String, Vec<String>), Str
                 ) {
                     // fletcher builds bent edges on the full center-to-
                     // center chord and only then crops at the nodes, so
-                    // arc geometry uses untrimmed centers
-                    let (x1, y1) = (grid.x(f.1), grid.y(f.0));
-                    let (x2, y2) = (grid.x(t.1), grid.y(t.0));
+                    // ARC geometry uses untrimmed centers; STRAIGHT
+                    // carriers measure pos along the visible segment
+                    let (mut x1, mut y1) = (grid.x(f.1), grid.y(f.0));
+                    let (mut x2, mut y2) = (grid.x(t.1), grid.y(t.0));
+                    if a.bend.is_none() {
+                        let (cdx, cdy) = (x2 - x1, y2 - y1);
+                        let half = |m: &std::collections::HashMap<(i32, i32), f64>,
+                                    p: (f64, f64)| {
+                            m.get(&(p.0.round() as i32, p.1.round() as i32))
+                                .copied()
+                                .unwrap_or(0.0)
+                        };
+                        let exit = |hw: f64, hh: f64| -> f64 {
+                            let tx = if cdx.abs() > 0.01 { (hw + 3.0) / cdx.abs() } else { f64::MAX };
+                            let ty = if cdy.abs() > 0.01 { (hh + 3.0) / cdy.abs() } else { f64::MAX };
+                            tx.min(ty).min(0.45)
+                        };
+                        let t1 = exit(half(&node_halfw, f), half(&node_halfh, f));
+                        let t2 = exit(half(&node_halfw, t), half(&node_halfh, t));
+                        x1 += cdx * t1;
+                        y1 += cdy * t1;
+                        x2 -= cdx * t2;
+                        y2 -= cdy * t2;
+                    }
                     let t01 = l.pos.unwrap_or(0.5);
                     let mut px = x1 + t01 * (x2 - x1);
                     let mut py = y1 + t01 * (y2 - y1);
@@ -1887,10 +1935,14 @@ fn split_mbox(s: &str) -> String {
                 }
                 if i % 2 == 1 {
                     out.push_str(seg); // math run
+                    out.push(' ');
                 } else {
-                    out.push_str(&format!("\\text{{{}}}", seg));
+                    // no gap between a math run and trailing punctuation
+                    if seg.starts_with(['-', '\'', ',', '.', ')']) && out.ends_with(' ') {
+                        out.pop();
+                    }
+                    out.push_str(&format!("\\text{{{}}} ", seg));
                 }
-                out.push(' ');
             }
             let tail: String = b[end..].iter().collect();
             s = format!("{}{}{}", &s[..pos], out.trim_end(), tail);
@@ -1903,12 +1955,25 @@ fn split_mbox(s: &str) -> String {
 
 /// Drop wrappers mitex has no handler for; keep their visible argument.
 fn clean_tex(s: &str) -> String {
-    let mut s = split_mbox(&emit::fix_itex_builtins(s));
-    s = regex::Regex::new(r"\\begin\{tabular\}\{[^}]*\}")
-        .unwrap()
-        .replace_all(&s, "\\begin{matrix}")
+    let mut s = emit::fix_itex_builtins(s);
+    // tabular content is text: wrap each row in \mbox so hyphens and
+    // words stay textual once transplanted into a matrix
+    let tab_re = regex::Regex::new(
+        r"(?s)\\begin\{tabular\}\{[^}]*\}(.*?)\\end\{tabular\}",
+    )
+    .unwrap();
+    s = tab_re
+        .replace_all(&s, |c: &regex::Captures| {
+            let rows: Vec<String> = c[1]
+                .split("\\\\")
+                .map(|r| r.trim())
+                .filter(|r| !r.is_empty())
+                .map(|r| format!("\\mbox{{{}}}", r))
+                .collect();
+            format!("\\begin{{matrix}}{}\\end{{matrix}}", rows.join(" \\\\ "))
+        })
         .to_string();
-    s = s.replace("\\end{tabular}", "\\end{matrix}");
+    s = split_mbox(&s);
     s = s.replace("\\mbox", "\\text");
     s = s.replace("\\\"", "\"");
     s = s.replace("\\rmfamily", "");
