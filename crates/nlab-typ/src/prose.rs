@@ -107,6 +107,73 @@ fn math_to_typst(tex: &str, display: bool) -> String {
     }
 }
 
+/// Inline `<img>`/`<figure>` HTML referencing the nLab file store.
+/// Images already present in the local cache (NLAB_FILES_ROOT, default
+/// build/nlab-files next to the content mirror) embed as #figure/#image
+/// with a `files/<name>` path; otherwise they degrade to a link.
+fn extract_images(src: &str, stash: &mut Stash) -> String {
+    // presentation wrappers around figures would make pulldown-cmark
+    // swallow the whole block (with our placeholder) as raw HTML
+    let src = regex::Regex::new(r"(?m)^\s*</?(center|div)[^>]*>\s*$")
+        .unwrap()
+        .replace_all(src, "")
+        .to_string();
+    let src = src.as_str();
+    let fig_re = regex::Regex::new(
+        r#"(?s)<figure[^>]*>\s*.*?<img[^>]*src="([^"]+)"[^>]*>.*?(?:<figcaption[^>]*>(.*?)</figcaption>)?\s*</figure>"#,
+    )
+    .unwrap();
+    let src = fig_re
+        .replace_all(src, |c: &regex::Captures| {
+            let cap = c.get(2).map(|m| m.as_str()).unwrap_or("");
+            stash.put(image_typst(&c[1], cap))
+        })
+        .to_string();
+    let img_re = regex::Regex::new(r#"<img[^>]*src="([^"]+)"[^>]*/?>"#).unwrap();
+    img_re
+        .replace_all(&src, |c: &regex::Captures| stash.put(image_typst(&c[1], "")))
+        .to_string()
+}
+
+fn files_root() -> std::path::PathBuf {
+    std::env::var("NLAB_FILES_ROOT")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from("build/nlab-files"))
+}
+
+fn image_typst(url: &str, caption_html: &str) -> String {
+    let caption = escape_typst(
+        &regex::Regex::new(r"<[^>]+>")
+            .unwrap()
+            .replace_all(caption_html, "")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" "),
+    );
+    // typst's #figure supplies its own "Figure N:" prefix
+    let caption = regex::Regex::new(r"^Figure \d+\s*[:.]\s*")
+        .unwrap()
+        .replace(&caption, "")
+        .to_string();
+    let name = url.rsplit('/').next().unwrap_or(url);
+    let cached = url.contains("/nlab/files/") && files_root().join(name).exists();
+    if cached {
+        let img = format!("image(\"files/{}\", width: 74%)", name);
+        if caption.is_empty() {
+            format!("#align(center, {})", img)
+        } else {
+            format!("#figure({}, caption: [{}])", img, caption)
+        }
+    } else {
+        let text = if caption.is_empty() {
+            "(figure)".to_string()
+        } else {
+            caption
+        };
+        format!("#link(\"{}\")[{}]", url, text)
+    }
+}
+
 fn wiki_target_url(name: &str) -> String {
     let mut enc = String::new();
     for c in name.trim().chars() {
@@ -522,6 +589,7 @@ pub(crate) fn page_to_typst(src: &str, title: Option<&str>) -> String {
         .unwrap()
         .replace_all(&src, "$1 $2")
         .to_string();
+    let src = extract_images(&src, &mut stash);
     let src = extract_math(&src, &mut stash);
     let src = extract_fences(&src, &mut stash);
     let src = extract_wiki(&src, &mut stash);
