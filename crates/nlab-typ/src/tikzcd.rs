@@ -882,7 +882,7 @@ fn len_pt(v: &str) -> f64 {
     if v.ends_with("ex") {
         n * 4.3
     } else if v.ends_with("em") {
-        n * 10.0
+        n * 11.0
     } else if v.ends_with("cm") {
         n * 28.35
     } else if v.ends_with("mm") {
@@ -897,7 +897,11 @@ fn shift_len(v: &str) -> f64 {
     if v.is_empty() {
         return 3.0;
     }
-    len_pt(v).clamp(1.0, 30.0)
+    let has_unit = v.ends_with("pt") || v.ends_with("em") || v.ends_with("ex")
+        || v.ends_with("cm") || v.ends_with("mm");
+    let n = len_pt(v);
+    let n = if has_unit { n } else { n * 3.5 };
+    n.clamp(1.0, 30.0)
 }
 
 // --------------------------------------------------------- cell parsing
@@ -1008,15 +1012,12 @@ fn spacing_from_opts(opts: &str) -> (f64, f64) {
                 "huge" => cur * 1.7,
                 _ => {
                     if let Some(inner) = v.strip_prefix("{betweenorigins,") {
-                        let n: f64 = inner
-                            .trim_end_matches('}')
-                            .trim_end_matches("pt")
-                            .parse()
-                            .unwrap_or(40.0);
+                        let n = len_pt(inner.trim_end_matches('}'));
                         (n - 16.0).max(6.0)
+                    } else if v.starts_with(|c: char| c.is_ascii_digit() || c == '-' || c == '+' || c == '.') {
+                        len_pt(v).max(2.0)
                     } else {
-                        let n: f64 = v.trim_end_matches("pt").parse().unwrap_or(cur);
-                        n.max(4.0)
+                        cur
                     }
                 }
             }
@@ -1225,11 +1226,75 @@ pub(crate) fn tikzcd_to_fletcher(src: &str) -> Result<(String, Vec<String>), Str
         rowsp *= 2.0;
     }
 
+    // drop cells that render to nothing (pure \phantom spacers) BEFORE
+    // deciding what the rail anchors below may attach to
+    let phantom_re = regex::Regex::new(r"\\[hv]?phantom\s*\{[^{}]*\}").unwrap();
+    let nodes: Vec<(i32, i32, String)> = nodes
+        .into_iter()
+        .filter(|(_, _, tex)| {
+            let gauge = phantom_re.replace_all(&clean_tex(tex), "").to_string();
+            !gauge
+                .trim_matches(|c: char| c.is_whitespace() || c == '{' || c == '}')
+                .is_empty()
+        })
+        .collect();
+
+    let mut node_halfw: std::collections::HashMap<(i32, i32), f64> =
+        std::collections::HashMap::new();
+    for (r, c, tex) in &nodes {
+        node_halfw.insert((*r, *c), est_halfwidth_pt(&clean_tex(tex)));
+    }
+
+    let ncols = 1 + nodes.iter().map(|(_, c, _)| *c).max().unwrap_or(0).max(2) as usize;
+    let nrows = 1 + nodes.iter().map(|(r, _, _)| *r).max().unwrap_or(0).max(2) as usize;
+    let mut colw = vec![0.0f64; ncols];
+    let mut rowh = vec![0.0f64; nrows];
+    for ((r, c), hw) in &node_halfw {
+        if let Some(w) = colw.get_mut(*c as usize) {
+            *w = w.max(2.0 * hw);
+        }
+        if let Some(h) = rowh.get_mut(*r as usize) {
+            *h = h.max(14.0);
+        }
+    }
+
+    // aim single-step diagonal arrows at a legible slope: squashed
+    // pentagons and stretched cubes both come from a fixed row spacing
+    // that ignores how wide the columns actually are
+    let norm_opts = opts.replace(' ', "");
+    if !norm_opts.contains("rowsep=") && !norm_opts.contains("sep=") {
+        let xs_tmp = {
+            let mut cs = vec![0.0];
+            for i in 1..colw.len() {
+                cs.push(cs[i - 1] + colw[i - 1] / 2.0 + colsp + colw[i] / 2.0);
+            }
+            cs
+        };
+        let mut targets: Vec<f64> = Vec::new();
+        for a in &arrows {
+            if let (Coord::Cell(r1, c1), Coord::Cell(r2, c2)) = (&a.from, &a.to) {
+                let (dr, dc) = ((r2 - r1).abs(), (c2 - c1).abs());
+                if dr > 0 && dc > 0 {
+                    let x1 = xs_tmp.get(*c1 as usize).copied().unwrap_or(0.0);
+                    let x2 = xs_tmp.get(*c2 as usize).copied().unwrap_or(0.0);
+                    let dx = (x2 - x1).abs();
+                    targets.push((0.55 * dx / dr as f64 - 14.0).max(8.0));
+                }
+            }
+        }
+        if targets.len() >= 2 {
+            targets.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let med = targets[targets.len() / 2];
+            rowsp = med.clamp(rowsp * 0.4, rowsp * 3.5);
+        }
+    }
+
     // \\[dim] row-spacing tweaks become fractional row offsets
     let mut row_off: Vec<f64> = Vec::with_capacity(row_gaps.len());
     let mut acc = 0.0;
     for g in &row_gaps {
-        acc += g / rowsp;
+        // one grid row spans the gap plus a typical node height
+        acc += g / (rowsp + 14.0);
         row_off.push(acc);
     }
     let eff = |p: (f64, f64)| -> (f64, f64) {
@@ -1241,6 +1306,20 @@ pub(crate) fn tikzcd_to_fletcher(src: &str) -> Result<(String, Vec<String>), Str
         };
         (p.0 + off, p.1)
     };
+
+    // gentle bends that carry a name= anchor get widened: a 2-cell will
+    // land between this arc and its parallel partner and needs room
+    let mut arrows = arrows;
+    for a in arrows.iter_mut() {
+        if a.labels.iter().any(|l| l.name.is_some()) {
+            if let Some(b) = a.bend {
+                if b.abs() > 1.0 && b.abs() < 40.0 {
+                    a.bend = Some(b.signum() * 40.0);
+                }
+            }
+        }
+    }
+    let arrows = arrows;
 
     // resolve name= anchors to points on their carrying arrow; a bent
     // carrier displaces the point sideways by the arc's sagitta
@@ -1280,37 +1359,6 @@ pub(crate) fn tikzcd_to_fletcher(src: &str) -> Result<(String, Vec<String>), Str
             }
         }
     }
-    // drop cells that render to nothing (pure \phantom spacers) BEFORE
-    // deciding what the rail anchors below may attach to
-    let phantom_re = regex::Regex::new(r"\\[hv]?phantom\s*\{[^{}]*\}").unwrap();
-    let nodes: Vec<(i32, i32, String)> = nodes
-        .into_iter()
-        .filter(|(_, _, tex)| {
-            let gauge = phantom_re.replace_all(&clean_tex(tex), "").to_string();
-            !gauge
-                .trim_matches(|c: char| c.is_whitespace() || c == '{' || c == '}')
-                .is_empty()
-        })
-        .collect();
-
-    let mut node_halfw: std::collections::HashMap<(i32, i32), f64> =
-        std::collections::HashMap::new();
-    for (r, c, tex) in &nodes {
-        node_halfw.insert((*r, *c), est_halfwidth_pt(&clean_tex(tex)));
-    }
-
-    let ncols = 1 + nodes.iter().map(|(_, c, _)| *c).max().unwrap_or(0).max(2) as usize;
-    let nrows = 1 + nodes.iter().map(|(r, _, _)| *r).max().unwrap_or(0).max(2) as usize;
-    let mut colw = vec![0.0f64; ncols];
-    let mut rowh = vec![0.0f64; nrows];
-    for ((r, c), hw) in &node_halfw {
-        if let Some(w) = colw.get_mut(*c as usize) {
-            *w = w.max(2.0 * hw);
-        }
-        if let Some(h) = rowh.get_mut(*r as usize) {
-            *h = h.max(14.0);
-        }
-    }
     let centers = |sizes: &[f64], sp: f64| -> Vec<f64> {
         let mut cs = vec![0.0];
         for i in 1..sizes.len() {
@@ -1331,7 +1379,7 @@ pub(crate) fn tikzcd_to_fletcher(src: &str) -> Result<(String, Vec<String>), Str
         std::collections::HashMap::new();
     for (r, c, tex) in &nodes {
         let cleaned = clean_tex(tex);
-        let label = emit::ts(&format!("\\displaystyle {}", cleaned));
+        let label = emit::ts(&cleaned);
         let er = *r as f64 + row_off.get(*r as usize).copied().unwrap_or(0.0);
         lines.push(format!(
             "  node(({}, {}), mi({}), name: <n{}-{}>),",
@@ -1680,9 +1728,54 @@ fn split_mbox(s: &str) -> String {
     s
 }
 
+
+/// `{A} \atop {B}` -> a stacked 2-row matrix (mitex lays atop flat).
+fn stack_atop(s: &str) -> String {
+    let mut s = s.to_string();
+    while let Some(pos) = s.find("\\atop") {
+        let before: Vec<char> = s[..pos].chars().collect();
+        let after_str = s[pos + 5..].to_string();
+        let after: Vec<char> = after_str.chars().collect();
+        // preceding balanced {...} group
+        let mut i = before.len();
+        while i > 0 && before[i - 1].is_whitespace() {
+            i -= 1;
+        }
+        if i == 0 || before[i - 1] != '}' {
+            break;
+        }
+        let mut depth = 0i32;
+        let mut j = i;
+        while j > 0 {
+            j -= 1;
+            match before[j] {
+                '}' => depth += 1,
+                '{' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let a: String = before[j + 1..i - 1].iter().collect();
+        // following balanced {...} group
+        let mut k = 0;
+        while k < after.len() && after[k].is_whitespace() {
+            k += 1;
+        }
+        let Some((b, end)) = read_group(&after, k, '{', '}') else { break };
+        let head: String = before[..j].iter().collect();
+        let tail: String = after[end..].iter().collect();
+        s = format!("{}\\begin{{matrix}}{}\\\\{}\\end{{matrix}}{}", head, a, b, tail);
+    }
+    s
+}
+
 /// Drop wrappers mitex has no handler for; keep their visible argument.
 fn clean_tex(s: &str) -> String {
-    let mut s = split_mbox(&emit::fix_itex_builtins(s));
+    let mut s = stack_atop(&split_mbox(&emit::fix_itex_builtins(s)));
     s = regex::Regex::new(r"\\color\{[^}]*\}")
         .unwrap()
         .replace_all(&s, "")
