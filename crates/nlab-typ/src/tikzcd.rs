@@ -1901,90 +1901,18 @@ fn split_mbox(s: &str) -> String {
 }
 
 
-/// `{A} \atop {B}` -> a stacked 2-row matrix (mitex lays atop flat).
-fn stack_atop(s: &str) -> String {
-    let mut s = s.to_string();
-    while let Some(pos) = s.find("\\atop") {
-        let before: Vec<char> = s[..pos].chars().collect();
-        let after_str = s[pos + 5..].to_string();
-        let after: Vec<char> = after_str.chars().collect();
-        // preceding balanced {...} group
-        let mut i = before.len();
-        while i > 0 && before[i - 1].is_whitespace() {
-            i -= 1;
-        }
-        if i == 0 || before[i - 1] != '}' {
-            break;
-        }
-        let mut depth = 0i32;
-        let mut j = i;
-        while j > 0 {
-            j -= 1;
-            match before[j] {
-                '}' => depth += 1,
-                '{' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        break;
-                    }
-                }
-                _ => {}
-            }
-        }
-        let a: String = before[j + 1..i - 1].iter().collect();
-        // following balanced {...} group
-        let mut k = 0;
-        while k < after.len() && after[k].is_whitespace() {
-            k += 1;
-        }
-        let Some((b, end)) = read_group(&after, k, '{', '}') else { break };
-        let head: String = before[..j].iter().collect();
-        let tail: String = after[end..].iter().collect();
-        s = format!("{}\\begin{{matrix}}{}\\\\{}\\end{{matrix}}{}", head, a, b, tail);
-    }
-    s
-}
-
 /// Drop wrappers mitex has no handler for; keep their visible argument.
 fn clean_tex(s: &str) -> String {
-    let mut s = stack_atop(&split_mbox(&emit::fix_itex_builtins(s)));
-    s = regex::Regex::new(r"\\color\{[^}]*\}")
-        .unwrap()
-        .replace_all(&s, "")
-        .to_string();
+    let mut s = split_mbox(&emit::fix_itex_builtins(s));
     s = regex::Regex::new(r"\\begin\{tabular\}\{[^}]*\}")
         .unwrap()
         .replace_all(&s, "\\begin{matrix}")
         .to_string();
     s = s.replace("\\end{tabular}", "\\end{matrix}");
-    s = s.replace("\\textbf", "\\mathbf");
-    s = s.replace("\\textit", "\\mathit");
-    s = s.replace("\\textsf", "\\mathsf");
-    s = s.replace("\\texttt", "\\mathtt");
-    let phantom_re = regex::Regex::new(r"\\([hv]?)phantom\s*\{([^{}]*)\}").unwrap();
-    s = phantom_re
-        .replace_all(&s, |c: &regex::Captures| {
-            if &c[1] == "v" {
-                return String::new();
-            }
-            // tikz authors use phantoms as width padding; translate to
-            // horizontal space of roughly the same width
-            let w = 2.0 * est_halfwidth_pt(&c[2]);
-            format!("\\hspace{{{}pt}}", fmt_f(w.max(2.0)))
-        })
-        .to_string();
     s = s.replace("\\mbox", "\\text");
-    s = s.replace("\\shortmid", "\\vert");
     s = s.replace("\\\"", "\"");
     s = s.replace("\\rmfamily", "");
-    for (cmd, keep_last_of) in [
-        ("\\scalebox", 2),
-        ("\\rotatebox", 2),
-        ("\\mathcolor", 2),
-        ("\\raisebox", 2),
-        ("\\mathclap", 1),
-        ("\\clap", 1),
-    ] {
+    for (cmd, keep_last_of) in [("\\mathcolor", 2), ("\\clap", 1)] {
         while let Some(pos) = s.find(cmd) {
             let b: Vec<char> = s[pos + cmd.len()..].chars().collect();
             let mut idx = 0usize;

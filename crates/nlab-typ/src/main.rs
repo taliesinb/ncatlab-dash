@@ -43,7 +43,9 @@ fn main() {
             let title = args.get(2).map(String::as_str);
             print!("{}", prose::page_to_typst(&input, title));
         }
-        "tikzcd" => match tikzcd::tikzcd_to_fletcher(&input) {
+        "tikzcd" => {
+            std::env::set_var("NLAB_LOCAL_MITEX", "1");
+            match tikzcd::tikzcd_to_fletcher(&input) {
             Ok((code, warns)) => {
                 for w in warns {
                     eprintln!("warn: ignored option {w:?}");
@@ -54,8 +56,9 @@ fn main() {
                 eprintln!("error: {e}");
                 std::process::exit(3);
             }
-        },
+        }},
         "tikzcds" => {
+            std::env::set_var("NLAB_LOCAL_MITEX", "1");
             use std::io::Write;
             let out = std::io::stdout();
             let mut out = out.lock();
