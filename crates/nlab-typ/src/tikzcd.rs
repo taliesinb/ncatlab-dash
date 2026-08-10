@@ -1673,21 +1673,35 @@ pub(crate) fn tikzcd_to_fletcher(src: &str) -> Result<(String, Vec<String>), Str
                         && node_halfw.contains_key(&(*r1, *c1))
                         && node_halfw.contains_key(&(*r2, *c2))
                     {
-                        let (a1, a2) = if horiz {
-                            if c2 > c1 {
-                                ("east", "west")
-                            } else {
-                                ("west", "east")
-                            }
-                        } else if r2 > r1 {
-                            ("south", "north")
+                        // explicit endpoints with snapping disabled:
+                        // fletcher would re-crop shifted lanes against
+                        // tall node boxes, giving rails unequal lengths
+                        let (hw1, hh1) = (node_halfw[&(*r1, *c1)], node_halfh[&(*r1, *c1)]);
+                        let (hw2, hh2) = (node_halfw[&(*r2, *c2)], node_halfh[&(*r2, *c2)]);
+                        let (cx1, cy1) = (grid.x(from.1), grid.y(from.0));
+                        let (cx2, cy2) = (grid.x(to.1), grid.y(to.0));
+                        let (p1, p2) = if horiz {
+                            let sgn = (cx2 - cx1).signum();
+                            // shift is left-of-travel: +x travel -> up
+                            let dyy = -sh * sgn;
+                            (
+                                (cx1 + sgn * (hw1 + 4.0), cy1 + dyy),
+                                (cx2 - sgn * (hw2 + 4.0), cy2 + dyy),
+                            )
                         } else {
-                            ("north", "south")
+                            let sgn = (cy2 - cy1).signum();
+                            // +y (down) travel -> left is +x
+                            let dxx = sh * sgn;
+                            (
+                                (cx1 + dxx, cy1 + sgn * (hh1 + 4.0)),
+                                (cx2 + dxx, cy2 - sgn * (hh2 + 4.0)),
+                            )
                         };
                         rail = Some((
-                            format!("(name: \"n{}-{}\", anchor: \"{}\")", r1, c1, a1),
-                            format!("(name: \"n{}-{}\", anchor: \"{}\")", r2, c2, a2),
+                            coord_str((grid.ry(p1.1), grid.rx(p1.0))),
+                            coord_str((grid.ry(p2.1), grid.rx(p2.0))),
                         ));
+                        shift_arg = None;
                     } else if (horiz || c1 == c2) && len > 0.01 {
                         // endpoint without a node: geometric fallback
                         let (nx, ny) = (dy / len, -dx / len);
@@ -1713,6 +1727,9 @@ pub(crate) fn tikzcd_to_fletcher(src: &str) -> Result<(String, Vec<String>), Str
         };
 
         let mut args = vec![v1.clone(), v2.clone(), format!("\"{}\"", a.final_mark())];
+        if rail.is_some() {
+            args.push("snap-to: (none, none)".into());
+        }
         let mut extra_labels: Vec<&Label> = Vec::new();
         let mut first = true;
         let swapped: Vec<Label> = a
