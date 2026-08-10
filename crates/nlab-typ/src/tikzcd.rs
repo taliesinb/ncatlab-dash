@@ -55,7 +55,7 @@ struct Arrow {
     crossing: bool,
     swap: bool,
     no_head: bool,
-    color: Option<&'static str>,
+    color: Option<String>,
     shorten_start: f64, // pt
     shorten_end: f64,
     loop_bend: Option<f64>, // self-loop, bend degrees
@@ -148,6 +148,13 @@ fn parse_to_path(p: &str) -> Option<(Vec<PathPt>, Option<(String, f64)>)> {
     }
     if pts.len() < 2 {
         return None;
+    }
+    // tikz begins the path at \tikztostart implicitly; give the rail
+    // its entry stub when the author's first point is already offset
+    let f = &pts[0];
+    if f.on_target || f.dx != 0.0 || f.dy != 0.0 {
+        let anchor = if f.on_target { 'c' } else { f.anchor };
+        pts.insert(0, PathPt { on_target: false, anchor, dx: 0.0, dy: 0.0 });
     }
     Some((pts, label))
 }
@@ -321,9 +328,10 @@ fn mask_amps(body: &str, amp_replacement: bool) -> String {
 
 /// Split at top-level separators. `sep` is either AMP (cells) or '\\'
 /// meaning the row break pair `\\`.
-fn split_top(s: &str, rows: bool) -> Vec<String> {
+fn split_top(s: &str, rows: bool) -> (Vec<String>, Vec<f64>) {
     let b: Vec<char> = s.chars().collect();
     let mut parts = Vec::new();
+    let mut gaps: Vec<f64> = vec![0.0]; // gaps[r] = \\[dim] before row r
     let mut cur = String::new();
     let (mut brace, mut env) = (0i32, 0i32);
     let mut i = 0;
@@ -421,16 +429,22 @@ fn split_top(s: &str, rows: bool) -> Vec<String> {
                 parts.push(cur.clone());
                 cur.clear();
                 i += 2;
-                // skip optional row-spacing option \\[6pt]
+                // optional row-spacing option \\[6pt]
                 while i < b.len() && b[i].is_whitespace() {
                     i += 1;
                 }
+                let mut gap = 0.0;
                 if i < b.len() && b[i] == '[' {
+                    let mut dim = String::new();
+                    i += 1;
                     while i < b.len() && b[i] != ']' {
+                        dim.push(b[i]);
                         i += 1;
                     }
                     i += 1;
+                    gap = len_pt(dim.trim());
                 }
+                gaps.push(gap);
                 continue;
             }
             cur.push(c);
@@ -453,7 +467,10 @@ fn split_top(s: &str, rows: bool) -> Vec<String> {
         i += 1;
     }
     parts.push(cur);
-    parts
+    while gaps.len() < parts.len() {
+        gaps.push(0.0);
+    }
+    (parts, gaps)
 }
 
 /// Split an `\ar[...]` argument list at top-level commas.
@@ -753,6 +770,27 @@ fn parse_style(arrow: &mut Arrow, p: &str) {
     }
 }
 
+/// quiver-style `{rgb,255:red,225;green,5;blue,23}` color specs
+fn rgb_color(v: &str) -> Option<String> {
+    let v = v.trim_start_matches('{').trim_end_matches('}');
+    if !v.starts_with("rgb") {
+        return None;
+    }
+    let comps = v.split_once(':')?.1;
+    let mut rgb = [0u32; 3];
+    for part in comps.split(';') {
+        let (name, val) = part.split_once(',')?;
+        let val: u32 = val.trim().parse().ok()?;
+        match name.trim() {
+            "red" => rgb[0] = val,
+            "green" => rgb[1] = val,
+            "blue" => rgb[2] = val,
+            _ => {}
+        }
+    }
+    Some(format!("rgb({}, {}, {})", rgb[0], rgb[1], rgb[2]))
+}
+
 fn named_color(name: &str) -> Option<&'static str> {
     Some(match name {
         "red" => "red",
@@ -787,14 +825,16 @@ fn parse_style_kv(arrow: &mut Arrow, p: &str) {
         arrow.shorten_start = len_pt(v);
         arrow.shorten_end = len_pt(v);
     } else if let Some(c) = named_color(norm.as_str()) {
-        arrow.color = Some(c);
+        arrow.color = Some(c.to_string());
     } else if let Some(v) = norm.strip_prefix("color=") {
         if let Some(c) = named_color(v) {
+            arrow.color = Some(c.to_string());
+        } else if let Some(c) = rgb_color(v) {
             arrow.color = Some(c);
         }
     } else if let Some(v) = norm.strip_prefix("draw=") {
         if let Some(c) = named_color(v) {
-            arrow.color = Some(c);
+            arrow.color = Some(c.to_string());
         }
     } else if let Some(v) = norm.strip_prefix("out=") {
         // keep the departure angle: it orients a bare out=/in= self-loop
@@ -833,6 +873,7 @@ fn eval_angle(v: &str) -> Option<f64> {
 }
 
 fn len_pt(v: &str) -> f64 {
+    let v = v.strip_prefix('+').unwrap_or(v);
     let num: String = v
         .chars()
         .take_while(|c| c.is_ascii_digit() || *c == '.' || *c == '-')
@@ -1152,11 +1193,12 @@ pub(crate) fn tikzcd_to_fletcher(src: &str) -> Result<(String, Vec<String>), Str
 
     let mut arrows: Vec<Arrow> = Vec::new();
     let mut nodes: Vec<(i32, i32, String)> = Vec::new();
-    for (r, rowsrc) in split_top(&body, true).iter().enumerate() {
+    let (body_rows, row_gaps) = split_top(&body, true);
+    for (r, rowsrc) in body_rows.iter().enumerate() {
         if rowsrc.trim().is_empty() {
             continue;
         }
-        for (c, cell) in split_top(rowsrc, false).iter().enumerate() {
+        for (c, cell) in split_top(rowsrc, false).0.iter().enumerate() {
             // `&[-30pt]`: column-spacing adjustment riding the separator
             let dim_re =
                 regex::Regex::new(r"^\s*\[\s*[+-]?[\d.]+\s*(pt|em|ex|cm|mm)?\s*\]").unwrap();
@@ -1183,13 +1225,33 @@ pub(crate) fn tikzcd_to_fletcher(src: &str) -> Result<(String, Vec<String>), Str
         rowsp *= 2.0;
     }
 
+    // \\[dim] row-spacing tweaks become fractional row offsets
+    let mut row_off: Vec<f64> = Vec::with_capacity(row_gaps.len());
+    let mut acc = 0.0;
+    for g in &row_gaps {
+        acc += g / rowsp;
+        row_off.push(acc);
+    }
+    let eff = |p: (f64, f64)| -> (f64, f64) {
+        let r = p.0.round();
+        let off = if r >= 0.0 {
+            row_off.get(r as usize).copied().unwrap_or_else(|| acc)
+        } else {
+            0.0
+        };
+        (p.0 + off, p.1)
+    };
+
     // resolve name= anchors to points on their carrying arrow; a bent
     // carrier displaces the point sideways by the arc's sagitta
     let mut anchors = std::collections::HashMap::new();
     for a in &arrows {
         for l in &a.labels {
             if let Some(name) = &l.name {
-                if let (Some(f), Some(t)) = (resolve(&a.from, &anchors), resolve(&a.to, &anchors)) {
+                if let (Some(f), Some(t)) = (
+                    resolve(&a.from, &anchors).map(&eff),
+                    resolve(&a.to, &anchors).map(&eff),
+                ) {
                     let t01 = l.pos.unwrap_or(0.5);
                     let mut p = (f.0 + t01 * (t.0 - f.0), f.1 + t01 * (t.1 - f.1));
                     if let Some(bend) = a.bend {
@@ -1201,6 +1263,14 @@ pub(crate) fn tikzcd_to_fletcher(src: &str) -> Result<(String, Vec<String>), Str
                         let sag = sag * bend.signum();
                         let (nx, ny) = (dy / len, -dx / len);
                         p = (p.0 + ny * sag / rowsp, p.1 + nx * sag / colsp);
+                    }
+                    // the carrying arrow's sideways shift moves its
+                    // midpoint too (parallel-pair 2-cells depend on it)
+                    if let Some(sh) = a.shift {
+                        let (dx, dy) = ((t.1 - f.1) * colsp, (t.0 - f.0) * rowsp);
+                        let len = dx.hypot(dy).max(1.0);
+                        let (nx, ny) = (dy / len, -dx / len);
+                        p = (p.0 + ny * sh / rowsp, p.1 + nx * sh / colsp);
                     }
                     // explicit xshift/yshift on the label (pt, y down
                     // in our row coords; tikz yshift is upward)
@@ -1262,14 +1332,19 @@ pub(crate) fn tikzcd_to_fletcher(src: &str) -> Result<(String, Vec<String>), Str
     for (r, c, tex) in &nodes {
         let cleaned = clean_tex(tex);
         let label = emit::ts(&format!("\\displaystyle {}", cleaned));
+        let er = *r as f64 + row_off.get(*r as usize).copied().unwrap_or(0.0);
         lines.push(format!(
             "  node(({}, {}), mi({}), name: <n{}-{}>),",
-            c, r, label, r, c
+            c,
+            fmt_f(er),
+            label,
+            r,
+            c
         ));
     }
     for a in &arrows {
-        let from = resolve(&a.from, &anchors).ok_or("unresolved-anchor")?;
-        let to = resolve(&a.to, &anchors).ok_or("unresolved-anchor")?;
+        let from = resolve(&a.from, &anchors).map(&eff).ok_or("unresolved-anchor")?;
+        let to = resolve(&a.to, &anchors).map(&eff).ok_or("unresolved-anchor")?;
         warnings.extend(a.warnings.iter().cloned());
 
         // squared detour rails: `to path={ (..) -- node{L} (..) -- .. }`
@@ -1326,7 +1401,7 @@ pub(crate) fn tikzcd_to_fletcher(src: &str) -> Result<(String, Vec<String>), Str
                 args.push(format!("label-side: {}", side));
                 args.push("label-sep: 0.15em".into());
             }
-            if let Some(c) = a.color {
+            if let Some(c) = &a.color {
                 args.push(format!("stroke: {}", c));
             }
             lines.push(format!("  edge({}),", args.join(", ")));
@@ -1473,7 +1548,7 @@ pub(crate) fn tikzcd_to_fletcher(src: &str) -> Result<(String, Vec<String>), Str
                 continue; // pure name= anchor, possibly spelled "{\ }"
             }
             if first {
-                push_label_args(&mut args, l, a.stroke_none, a.color);
+                push_label_args(&mut args, l, a.stroke_none, a.color.as_deref());
                 first = false;
             } else {
                 extra_labels.push(l);
@@ -1490,13 +1565,13 @@ pub(crate) fn tikzcd_to_fletcher(src: &str) -> Result<(String, Vec<String>), Str
         }
         if a.stroke_none {
             args.push("stroke: none".into());
-        } else if let Some(c) = a.color {
+        } else if let Some(c) = &a.color {
             args.push(format!("stroke: {}", c));
         }
         lines.push(format!("  edge({}),", args.join(", ")));
         for l in extra_labels {
             let mut args = vec![v1.clone(), v2.clone(), "\"-\"".to_string()];
-            push_label_args(&mut args, l, true, a.color);
+            push_label_args(&mut args, l, true, a.color.as_deref());
             if let Some(bend) = a.bend {
                 args.push(format!("bend: {}deg", fmt_f(bend)));
             }
@@ -1608,6 +1683,15 @@ fn split_mbox(s: &str) -> String {
 /// Drop wrappers mitex has no handler for; keep their visible argument.
 fn clean_tex(s: &str) -> String {
     let mut s = split_mbox(&emit::fix_itex_builtins(s));
+    s = regex::Regex::new(r"\\color\{[^}]*\}")
+        .unwrap()
+        .replace_all(&s, "")
+        .to_string();
+    s = regex::Regex::new(r"\\begin\{tabular\}\{[^}]*\}")
+        .unwrap()
+        .replace_all(&s, "\\begin{matrix}")
+        .to_string();
+    s = s.replace("\\end{tabular}", "\\end{matrix}");
     s = s.replace("\\textbf", "\\mathbf");
     s = s.replace("\\textit", "\\mathit");
     s = s.replace("\\textsf", "\\mathsf");
