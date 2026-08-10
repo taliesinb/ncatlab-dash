@@ -1387,7 +1387,7 @@ pub(crate) fn tikzcd_to_fletcher(src: &str) -> Result<(String, Vec<String>), Str
         };
         // large negative pulls land rows next to earlier content; our
         // row heights differ from tikz's, so cushion the overlap a bit
-        let cushion = if *g <= -50.0 { 10.0 } else { 0.0 };
+        let cushion = if *g <= -50.0 { 16.0 } else { 0.0 };
         acc += (g + cushion) / step;
         row_off.push(acc);
     }
@@ -1426,8 +1426,29 @@ pub(crate) fn tikzcd_to_fletcher(src: &str) -> Result<(String, Vec<String>), Str
                     resolve(&a.from, &anchors).map(&eff),
                     resolve(&a.to, &anchors).map(&eff),
                 ) {
-                    let (x1, y1) = (grid.x(f.1), grid.y(f.0));
-                    let (x2, y2) = (grid.x(t.1), grid.y(t.0));
+                    let (mut x1, mut y1) = (grid.x(f.1), grid.y(f.0));
+                    let (mut x2, mut y2) = (grid.x(t.1), grid.y(t.0));
+                    // fletcher draws edges between node BORDERS: trim
+                    // the chord to each node's bounding-box exit point
+                    let (cdx, cdy) = (x2 - x1, y2 - y1);
+                    let clen = cdx.hypot(cdy).max(1.0);
+                    let half = |m: &std::collections::HashMap<(i32, i32), f64>,
+                                p: (f64, f64)| {
+                        m.get(&(p.0.round() as i32, p.1.round() as i32))
+                            .copied()
+                            .unwrap_or(0.0)
+                    };
+                    let exit = |hw: f64, hh: f64| -> f64 {
+                        let tx = if cdx.abs() > 0.01 { (hw + 3.0) / cdx.abs() } else { f64::MAX };
+                        let ty = if cdy.abs() > 0.01 { (hh + 3.0) / cdy.abs() } else { f64::MAX };
+                        tx.min(ty).min(0.45)
+                    };
+                    let t1 = exit(half(&node_halfw, f), half(&node_halfh, f));
+                    let t2 = exit(half(&node_halfw, t), half(&node_halfh, t));
+                    x1 += cdx * t1;
+                    y1 += cdy * t1;
+                    x2 -= cdx * t2;
+                    y2 -= cdy * t2;
                     let t01 = l.pos.unwrap_or(0.5);
                     let mut px = x1 + t01 * (x2 - x1);
                     let mut py = y1 + t01 * (y2 - y1);
@@ -1436,7 +1457,7 @@ pub(crate) fn tikzcd_to_fletcher(src: &str) -> Result<(String, Vec<String>), Str
                     let (nx, ny) = (dy / len, -dx / len); // left of travel
                     if let Some(bend) = a.bend {
                         let th = bend.to_radians();
-                        let sag = 1.25 * len * (1.0 - th.cos()).abs()
+                        let sag = 1.15 * len * (1.0 - th.cos()).abs()
                             / (2.0 * th.sin().abs().max(0.05));
                         px += nx * sag * bend.signum();
                         py += ny * sag * bend.signum();
