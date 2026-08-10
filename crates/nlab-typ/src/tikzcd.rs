@@ -914,7 +914,8 @@ fn shift_len(v: &str) -> f64 {
         || v.ends_with("cm") || v.ends_with("mm");
     let n = len_pt(v);
     let n = if has_unit { n } else { n * 3.5 };
-    n.clamp(1.0, 30.0)
+    // clamp the magnitude only: shift right=-20pt is a LEFT shift
+    n.signum() * n.abs().clamp(1.0, 45.0)
 }
 
 // --------------------------------------------------------- cell parsing
