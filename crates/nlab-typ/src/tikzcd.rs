@@ -1391,6 +1391,7 @@ pub(crate) fn tikzcd_to_fletcher(src: &str) -> Result<(String, Vec<String>), Str
         acc += (g + cushion) / step;
         row_off.push(acc);
     }
+    #[allow(clippy::type_complexity)]
     let eff = |p: (f64, f64)| -> (f64, f64) {
         let r = p.0.round();
         let off = if r >= 0.0 {
@@ -1415,6 +1416,7 @@ pub(crate) fn tikzcd_to_fletcher(src: &str) -> Result<(String, Vec<String>), Str
     }
     let arrows = arrows;
 
+    let mut debug_dots: Vec<(f64, f64)> = Vec::new();
     // resolve name= anchors to points on their carrying arrow, in
     // physical coordinates (mixing pt with grid units broke whenever
     // rows were non-uniform)
@@ -1422,9 +1424,12 @@ pub(crate) fn tikzcd_to_fletcher(src: &str) -> Result<(String, Vec<String>), Str
     for a in &arrows {
         for l in &a.labels {
             if let Some(name) = &l.name {
+                let eff_c = |c: &Coord, p: (f64, f64)| {
+                    if matches!(c, Coord::Cell(..)) { eff(p) } else { p }
+                };
                 if let (Some(f), Some(t)) = (
-                    resolve(&a.from, &anchors).map(&eff),
-                    resolve(&a.to, &anchors).map(&eff),
+                    resolve(&a.from, &anchors).map(|p| eff_c(&a.from, p)),
+                    resolve(&a.to, &anchors).map(|p| eff_c(&a.to, p)),
                 ) {
                     let (mut x1, mut y1) = (grid.x(f.1), grid.y(f.0));
                     let (mut x2, mut y2) = (grid.x(t.1), grid.y(t.0));
@@ -1468,6 +1473,9 @@ pub(crate) fn tikzcd_to_fletcher(src: &str) -> Result<(String, Vec<String>), Str
                     }
                     px += l.xshift;
                     py -= l.yshift; // tikz yshift is upward
+                    if std::env::var("NLAB_DEBUG_ANCHORS").is_ok() {
+                        debug_dots.push((grid.ry(py), grid.rx(px)));
+                    }
                     anchors.insert(name.clone(), (grid.ry(py), grid.rx(px)));
                 }
             }
@@ -1492,8 +1500,15 @@ pub(crate) fn tikzcd_to_fletcher(src: &str) -> Result<(String, Vec<String>), Str
         ));
     }
     for a in &arrows {
-        let from = resolve(&a.from, &anchors).map(&eff).ok_or("unresolved-anchor")?;
-        let to = resolve(&a.to, &anchors).map(&eff).ok_or("unresolved-anchor")?;
+        let eff_c = |c: &Coord, p: (f64, f64)| {
+            if matches!(c, Coord::Cell(..)) { eff(p) } else { p }
+        };
+        let from = resolve(&a.from, &anchors)
+            .map(|p| eff_c(&a.from, p))
+            .ok_or("unresolved-anchor")?;
+        let to = resolve(&a.to, &anchors)
+            .map(|p| eff_c(&a.to, p))
+            .ok_or("unresolved-anchor")?;
         warnings.extend(a.warnings.iter().cloned());
 
         // squared detour rails: `to path={ (..) -- node{L} (..) -- .. }`
@@ -1595,7 +1610,7 @@ pub(crate) fn tikzcd_to_fletcher(src: &str) -> Result<(String, Vec<String>), Str
         // fuse; node cells 0 — fletcher clips at the node border itself
         let end_inset = |c: &Coord| -> f64 {
             match c {
-                Coord::Name(_) => 3.0,
+                Coord::Name(_) => 1.5,
                 Coord::Cell(r, cc) => {
                     if node_halfw.contains_key(&(*r, *cc)) {
                         0.0
@@ -1729,6 +1744,13 @@ pub(crate) fn tikzcd_to_fletcher(src: &str) -> Result<(String, Vec<String>), Str
         }
     }
 
+    for (r, c) in &debug_dots {
+        lines.push(format!(
+            "  node(({}, {}), circle(radius: 1.4pt, fill: red)),",
+            fmt_f(*c),
+            fmt_f(*r)
+        ));
+    }
     Ok((
         format!(
             "#diagram(\n  spacing: ({}pt, {}pt),\n{}\n)\n",
