@@ -1110,6 +1110,52 @@ impl PhysGrid {
 /// Crude rendered-width estimate (pt at 11pt math) for rail anchoring:
 /// tikz clips shifted arrows at node borders, fletcher can't, so we
 /// guess the border. Multi-line cells measure their widest row.
+
+/// Measure the real rendered size of each cell by compiling a probe
+/// document with typst and querying `measure()` results. Falls back to
+/// None (callers keep the glyph-count estimate) on any failure or when
+/// NLAB_MEASURE=0.
+fn measure_nodes(labels_ts: &[String]) -> Option<Vec<(f64, f64)>> {
+    if labels_ts.is_empty()
+        || std::env::var("NLAB_MEASURE").map(|v| v == "0").unwrap_or(false)
+    {
+        return None;
+    }
+    let mut doc = String::from(
+        "#import \"@local/mitex:0.2.7\": mi-itex\n#set text(size: 11pt)\n#context {\n  let ms = (\n",
+    );
+    for l in labels_ts {
+        doc.push_str(&format!("    measure(mi-itex({})),\n", l));
+    }
+    doc.push_str(
+        "  )\n  [#metadata(ms.map(s => (s.width.pt(), s.height.pt())))<m>]\n}\n",
+    );
+    let path = std::env::temp_dir().join(format!(
+        "nlab-measure-{}-{}.typ",
+        std::process::id(),
+        labels_ts.len()
+    ));
+    std::fs::write(&path, doc).ok()?;
+    let out = std::process::Command::new("typst")
+        .args(["query", path.to_str()?, "<m>", "--field", "value", "--one"])
+        .output()
+        .ok()?;
+    let _ = std::fs::remove_file(&path);
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let re = regex::Regex::new(r"[0-9]+(?:\.[0-9]+)?").unwrap();
+    let nums: Vec<f64> = re
+        .find_iter(&text)
+        .filter_map(|m| m.as_str().parse().ok())
+        .collect();
+    if nums.len() != labels_ts.len() * 2 {
+        return None;
+    }
+    Some(nums.chunks(2).map(|c| (c[0], c[1])).collect())
+}
+
 fn est_halfwidth_pt(tex: &str) -> f64 {
     fn row_width(row: &str) -> f64 {
         let b: Vec<char> = row.chars().collect();
@@ -1252,10 +1298,21 @@ pub(crate) fn tikzcd_to_fletcher(src: &str) -> Result<(String, Vec<String>), Str
         })
         .collect();
 
+    let labels_ts: Vec<String> =
+        nodes.iter().map(|(_, _, tex)| emit::ts(&clean_tex(tex))).collect();
+    let measured = measure_nodes(&labels_ts);
+
     let mut node_halfw: std::collections::HashMap<(i32, i32), f64> =
         std::collections::HashMap::new();
-    for (r, c, tex) in &nodes {
-        node_halfw.insert((*r, *c), est_halfwidth_pt(&clean_tex(tex)));
+    let mut node_halfh: std::collections::HashMap<(i32, i32), f64> =
+        std::collections::HashMap::new();
+    for (i, (r, c, tex)) in nodes.iter().enumerate() {
+        let (w, h) = measured
+            .as_ref()
+            .map(|m| m[i])
+            .unwrap_or_else(|| (2.0 * est_halfwidth_pt(&clean_tex(tex)), 14.0));
+        node_halfw.insert((*r, *c), w / 2.0);
+        node_halfh.insert((*r, *c), h / 2.0);
     }
 
     let ncols = 1 + nodes.iter().map(|(_, c, _)| *c).max().unwrap_or(0).max(2) as usize;
@@ -1266,8 +1323,9 @@ pub(crate) fn tikzcd_to_fletcher(src: &str) -> Result<(String, Vec<String>), Str
         if let Some(w) = colw.get_mut(*c as usize) {
             *w = w.max(2.0 * hw);
         }
+        let hh = node_halfh.get(&(*r, *c)).copied().unwrap_or(7.0);
         if let Some(h) = rowh.get_mut(*r as usize) {
-            *h = h.max(14.0);
+            *h = h.max((2.0 * hh).max(10.0));
         }
     }
 
@@ -1327,7 +1385,10 @@ pub(crate) fn tikzcd_to_fletcher(src: &str) -> Result<(String, Vec<String>), Str
         } else {
             rowsp + 14.0
         };
-        acc += g / step;
+        // large negative pulls land rows next to earlier content; our
+        // row heights differ from tikz's, so cushion the overlap a bit
+        let cushion = if *g <= -50.0 { 10.0 } else { 0.0 };
+        acc += (g + cushion) / step;
         row_off.push(acc);
     }
     let eff = |p: (f64, f64)| -> (f64, f64) {
@@ -1375,9 +1436,7 @@ pub(crate) fn tikzcd_to_fletcher(src: &str) -> Result<(String, Vec<String>), Str
                     let (nx, ny) = (dy / len, -dx / len); // left of travel
                     if let Some(bend) = a.bend {
                         let th = bend.to_radians();
-                        // 1.35: our width estimates undershoot fletcher's
-                        // real chord, and with it the arc's sagitta
-                        let sag = 1.35 * len * (1.0 - th.cos()).abs()
+                        let sag = 1.25 * len * (1.0 - th.cos()).abs()
                             / (2.0 * th.sin().abs().max(0.05));
                         px += nx * sag * bend.signum();
                         py += ny * sag * bend.signum();
