@@ -472,6 +472,7 @@ const PAGE_PREAMBLE: &str = r##"#import "@local/mitex:0.2.7": mi-itex, mitex-ite
 #set text(10.5pt)
 #set heading(numbering: "1.")
 #show link: set text(fill: rgb("#1a6318"))
+#show figure.caption: set text(0.85em)
 #let nlab-count = counter("nlab-env")
 #show heading.where(level: 1): it => { nlab-count.update(0); it }
 #let nlab-env(kind, style, id: none, body) = {
