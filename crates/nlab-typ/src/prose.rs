@@ -28,7 +28,28 @@ impl Stash {
 
 // ------------------------------------------------------------ pre-pass
 
+/// Pull `\label{Id}` out of a math body; returns (tex, typst anchors).
+fn split_math_labels(tex: &str) -> (String, String) {
+    let re = regex::Regex::new(r"\\label\{([A-Za-z0-9:_.-]+)\}").unwrap();
+    let mut anchors = String::new();
+    let tex = re
+        .replace_all(tex, |c: &regex::Captures| {
+            anchors.push_str(&format!("#metadata(none)#label(\"{}\")", &c[1]));
+            String::new()
+        })
+        .to_string();
+    (tex, anchors)
+}
+
 fn extract_math(src: &str, stash: &mut Stash) -> String {
+    // \[ ... \] display math first (chars, so the $-scanner never sees it)
+    let bracket_re = regex::Regex::new(r"(?s)\\\[(.*?)\\\]").unwrap();
+    let src = bracket_re
+        .replace_all(src, |c: &regex::Captures| {
+            let (tex, anchors) = split_math_labels(&c[1]);
+            stash.put(format!("{}{}", math_to_typst(&tex, true), anchors))
+        })
+        .to_string();
     let mut out = String::new();
     let b: Vec<char> = src.chars().collect();
     let mut i = 0usize;
@@ -55,7 +76,10 @@ fn extract_math(src: &str, stash: &mut Stash) -> String {
             }
             if let Some(j) = found {
                 let tex: String = b[i + open..j].iter().collect();
-                out.push_str(&stash.put(math_to_typst(&tex, display)));
+                let (tex, anchors) = split_math_labels(&tex);
+                out.push_str(
+                    &stash.put(format!("{}{}", math_to_typst(&tex, display), anchors)),
+                );
                 i = j + open;
                 continue;
             }
@@ -367,6 +391,10 @@ const PAGE_PREAMBLE: &str = r##"#import "@local/mitex:0.2.7": mi-itex, mitex-ite
 #let atop = scope-or("atop", none)
 #let negthinspace = scope-or("negthinspace", none)
 #let mitexcite = scope-or("mitexcite", none)
+#let mitexcolor = scope-or("mitexcolor", none)
+#let mathclap = scope-or("mathclap", none)
+#let rlap = scope-or("rlap", none)
+#let llap = scope-or("llap", none)
 #let tfrac = scope-or("tfrac", none)
 #let dfrac = scope-or("dfrac", none)
 #let mathsf = scope-or("mathsf", none)
@@ -434,16 +462,64 @@ pub(crate) fn page_to_typst(src: &str, title: Option<&str>) -> String {
             }
         })
         .to_string();
-    // raw proof/environment wrappers in prose (as opposed to +-- fences)
-    let src = regex::Regex::new(r"\\begin\{proof\}")
-        .unwrap()
-        .replace_all(&src, |_: &regex::Captures| {
-            stash.put("#nlab-env(\"Proof\", \"proof\")[".into())
+    // raw LaTeX-style theorem environments in prose (as opposed to the
+    // +-- fences), optionally carrying a \label{Id}
+    const ENVS: &str =
+        "proposition|theorem|lemma|corollary|definition|example|remark|note|proof";
+    // one sequential pass so a stray \end (author error) is the one
+    // dropped, not the document's final legitimate close
+    let env_re = regex::Regex::new(&format!(
+        r"\\(begin|end)\{{({})\}}(\s*\\label\{{([A-Za-z0-9:_.-]+)\}})?",
+        ENVS
+    ))
+    .unwrap();
+    let mut env_depth = 0i32;
+    let src = env_re
+        .replace_all(&src, |c: &regex::Captures| {
+            if &c[1] == "end" {
+                return if env_depth > 0 {
+                    env_depth -= 1;
+                    stash.put("]".into())
+                } else {
+                    String::new()
+                };
+            }
+            env_depth += 1;
+            let (kind, style) = match &c[2] {
+                "proof" => ("Proof", "proof"),
+                "proposition" => ("Proposition", "num"),
+                "theorem" => ("Theorem", "num"),
+                "lemma" => ("Lemma", "num"),
+                "corollary" => ("Corollary", "num"),
+                "definition" => ("Definition", "num"),
+                "example" => ("Example", "num"),
+                "remark" => ("Remark", "num"),
+                _ => ("Note", "num"),
+            };
+            let id_arg = c
+                .get(4)
+                .map(|m| format!(", id: \"{}\"", m.as_str()))
+                .unwrap_or_default();
+            stash.put(format!("#nlab-env(\"{}\", \"{}\"{})[", kind, style, id_arg))
         })
         .to_string();
-    let src = regex::Regex::new(r"\\end\{proof\}")
+    // any still-unclosed environments get their closes at document end
+    let mut src = src;
+    for _ in 0..env_depth.max(0) {
+        src = format!("{}\n{}", src, stash.put("]".into()));
+    }
+    let src = src.replace("\\linebreak", " ");
+    // maruku table-of-contents list item
+    let src = regex::Regex::new(r"(?m)^\*\s*table of contents\s*\n\{:\s*toc[^}]*\}\s*$")
         .unwrap()
-        .replace_all(&src, |_: &regex::Captures| stash.put("]".into()))
+        .replace_all(&src, |_: &regex::Captures| {
+            stash.put("#outline(depth: 2)".into())
+        })
+        .to_string();
+    // closed ATX headings without spaces (`#Contents#`) aren't CommonMark
+    let src = regex::Regex::new(r"(?m)^(#+)\s*(.*?)\s*#+\s*$")
+        .unwrap()
+        .replace_all(&src, "$1 $2")
         .to_string();
     let src = extract_math(&src, &mut stash);
     let src = extract_fences(&src, &mut stash);
@@ -456,6 +532,13 @@ pub(crate) fn page_to_typst(src: &str, title: Option<&str>) -> String {
         .replace_all(&src, |c: &regex::Captures| {
             stash.put(format!("#nlab-ref(\"{}\")", &c[1]))
         })
+        .to_string();
+    // an anchor at the end of a heading would ride into the heading
+    // body and be duplicated by #outline(); move it below the heading
+    let heading_anchor_re =
+        regex::Regex::new(r"(?m)^(#+[^\n]*?)\s*\{#([A-Za-z0-9:_-]+)\}\s*$").unwrap();
+    let src = heading_anchor_re
+        .replace_all(&src, "$1\n\n{#$2}")
         .to_string();
     // Maruku anchor IALs: {#Id} standalone or inline; a repeated id
     // would be a duplicate typst label, so only the first one anchors
@@ -496,5 +579,22 @@ pub(crate) fn page_to_typst(src: &str, title: Option<&str>) -> String {
         })
         .unwrap_or_default();
     let body = emit::nativize_calls(&format!("{}{}\n", title_block, body));
+    // typst labels must be unique: only the first attachment of an id
+    // survives (anchors, env ids, and math \label{}s share a namespace)
+    let mut seen = std::collections::HashSet::new();
+    let dedupe_re = regex::Regex::new(
+        r#"#metadata\(none\)#label\("([A-Za-z0-9:_.-]+)"\)|, id: "([A-Za-z0-9:_.-]+)""#,
+    )
+    .unwrap();
+    let body = dedupe_re
+        .replace_all(&body, |c: &regex::Captures| {
+            let id = c.get(1).or(c.get(2)).unwrap().as_str().to_string();
+            if seen.insert(id) {
+                c[0].to_string()
+            } else {
+                String::new()
+            }
+        })
+        .to_string();
     emit::localize_calls(format!("{}\n{}", PAGE_PREAMBLE, body))
 }
