@@ -736,6 +736,53 @@ fn spacing_from_opts(opts: &str) -> (f64, f64) {
     (col, row)
 }
 
+/// Crude rendered-width estimate (pt at 11pt math) for rail anchoring:
+/// tikz clips shifted arrows at node borders, fletcher can't, so we
+/// guess the border. Multi-line cells measure their widest row.
+fn est_halfwidth_pt(tex: &str) -> f64 {
+    fn row_width(row: &str) -> f64 {
+        let b: Vec<char> = row.chars().collect();
+        let mut w = 0.0;
+        let mut i = 0;
+        while i < b.len() {
+            let c = b[i];
+            if c == '\\' {
+                let mut j = i + 1;
+                let mut name = String::new();
+                while j < b.len() && b[j].is_ascii_alphabetic() {
+                    name.push(b[j]);
+                    j += 1;
+                }
+                if name.is_empty() {
+                    w += 4.0;
+                    i += 2;
+                    continue;
+                }
+                w += match name.as_str() {
+                    "text" | "mathrm" | "mathbf" | "mathcal" | "mathbb" | "mathsf"
+                    | "mathtt" | "mathit" | "mathfrak" | "mathscr" | "big" | "Big"
+                    | "bigg" | "Bigg" | "bigl" | "bigr" | "Bigl" | "Bigr" | "left"
+                    | "right" | "displaystyle" | "textstyle" | "scriptstyle" | "begin"
+                    | "end" | "array" | "aligned" | "overset" | "underset" => 0.0,
+                    "quad" => 11.0,
+                    "qquad" => 22.0,
+                    _ => 6.5,
+                };
+                i = j;
+                continue;
+            }
+            w += match c {
+                '{' | '}' | '^' | '_' => 0.0,
+                c if c.is_whitespace() => 0.0,
+                _ => 5.3,
+            };
+            i += 1;
+        }
+        w
+    }
+    tex.split("\\\\").map(row_width).fold(0.0, f64::max) / 2.0
+}
+
 // -------------------------------------------------------------- output
 
 fn fmt_f(x: f64) -> String {
@@ -835,21 +882,33 @@ pub(crate) fn tikzcd_to_fletcher(src: &str) -> Result<(String, Vec<String>), Str
             }
         }
     }
+    // drop cells that render to nothing (pure \phantom spacers) BEFORE
+    // deciding what the rail anchors below may attach to
+    let phantom_re = regex::Regex::new(r"\\[hv]?phantom\s*\{[^{}]*\}").unwrap();
+    let nodes: Vec<(i32, i32, String)> = nodes
+        .into_iter()
+        .filter(|(_, _, tex)| {
+            let gauge = phantom_re.replace_all(&clean_tex(tex), "").to_string();
+            !gauge
+                .trim_matches(|c: char| c.is_whitespace() || c == '{' || c == '}')
+                .is_empty()
+        })
+        .collect();
+
+    let mut node_halfw: std::collections::HashMap<(i32, i32), f64> =
+        std::collections::HashMap::new();
+    for (r, c, tex) in &nodes {
+        node_halfw.insert((*r, *c), est_halfwidth_pt(&clean_tex(tex)));
+    }
+
     let mut lines: Vec<String> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
     for (r, c, tex) in &nodes {
         let cleaned = clean_tex(tex);
-        let gauge = regex::Regex::new(r"\\[hv]?phantom\s*\{[^{}]*\}")
-            .unwrap()
-            .replace_all(&cleaned, "")
-            .to_string();
-        if gauge.trim_matches(|c: char| c.is_whitespace() || c == '{' || c == '}').is_empty() {
-            continue;
-        }
         let label = emit::ts(&format!("\\displaystyle {}", cleaned));
         lines.push(format!(
-            "  node(({}, {}), mi({})),",
-            c, r, label
+            "  node(({}, {}), mi({}), name: <n{}-{}>),",
+            c, r, label, r, c
         ));
     }
     for a in &arrows {
@@ -886,19 +945,45 @@ pub(crate) fn tikzcd_to_fletcher(src: &str) -> Result<(String, Vec<String>), Str
             yb -= dy / len * s2;
             moved = true;
         }
+        // arrows shifted beyond ~8pt detach from the nodes (adjoint-
+        // triple rails); fletcher would draw a shifted center-to-center
+        // line, so pin them to the facing node-border anchors instead
+        let mut rail: Option<(String, String)> = None;
         if let Some(sh) = shift_arg {
-            let axis = from.0 == to.0 || from.1 == to.1;
-            if axis && sh.abs() > 8.0 && len > 0.01 {
-                // a rail detached from the nodes (adjoint-triple style);
-                // fletcher would draw a shifted center-to-center line
-                let (nx, ny) = (dy / len, -dx / len);
-                let inset = (len * 0.2).min(14.0);
-                xa += nx * sh + dx / len * inset;
-                ya += ny * sh + dy / len * inset;
-                xb += nx * sh - dx / len * inset;
-                yb += ny * sh - dy / len * inset;
-                shift_arg = None;
-                moved = true;
+            if sh.abs() > 8.0 {
+                if let (Coord::Cell(r1, c1), Coord::Cell(r2, c2)) = (&a.from, &a.to) {
+                    let horiz = r1 == r2;
+                    if (horiz || c1 == c2)
+                        && node_halfw.contains_key(&(*r1, *c1))
+                        && node_halfw.contains_key(&(*r2, *c2))
+                    {
+                        let (a1, a2) = if horiz {
+                            if c2 > c1 {
+                                ("east", "west")
+                            } else {
+                                ("west", "east")
+                            }
+                        } else if r2 > r1 {
+                            ("south", "north")
+                        } else {
+                            ("north", "south")
+                        };
+                        rail = Some((
+                            format!("(name: \"n{}-{}\", anchor: \"{}\")", r1, c1, a1),
+                            format!("(name: \"n{}-{}\", anchor: \"{}\")", r2, c2, a2),
+                        ));
+                    } else if (horiz || c1 == c2) && len > 0.01 {
+                        // endpoint without a node: geometric fallback
+                        let (nx, ny) = (dy / len, -dx / len);
+                        let inset = (len * 0.2).min(14.0);
+                        xa += nx * sh + dx / len * inset;
+                        ya += ny * sh + dy / len * inset;
+                        xb += nx * sh - dx / len * inset;
+                        yb += ny * sh - dy / len * inset;
+                        shift_arg = None;
+                        moved = true;
+                    }
+                }
             }
         }
         let (from, to) = if moved {
@@ -906,12 +991,12 @@ pub(crate) fn tikzcd_to_fletcher(src: &str) -> Result<(String, Vec<String>), Str
         } else {
             (from, to)
         };
+        let (v1, v2) = match &rail {
+            Some((v1, v2)) => (v1.clone(), v2.clone()),
+            None => (coord_str(from), coord_str(to)),
+        };
 
-        let mut args = vec![
-            coord_str(from),
-            coord_str(to),
-            format!("\"{}\"", a.final_mark()),
-        ];
+        let mut args = vec![v1.clone(), v2.clone(), format!("\"{}\"", a.final_mark())];
         let mut extra_labels: Vec<&Label> = Vec::new();
         let mut first = true;
         let swapped: Vec<Label> = a
@@ -956,7 +1041,7 @@ pub(crate) fn tikzcd_to_fletcher(src: &str) -> Result<(String, Vec<String>), Str
         }
         lines.push(format!("  edge({}),", args.join(", ")));
         for l in extra_labels {
-            let mut args = vec![coord_str(from), coord_str(to), "\"-\"".to_string()];
+            let mut args = vec![v1.clone(), v2.clone(), "\"-\"".to_string()];
             push_label_args(&mut args, l, true, a.color);
             if let Some(bend) = a.bend {
                 args.push(format!("bend: {}deg", fmt_f(bend)));
