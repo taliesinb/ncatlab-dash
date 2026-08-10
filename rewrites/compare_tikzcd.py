@@ -27,7 +27,7 @@ OUT = HERE / "out/compare-tikzcd.html"
 PRE = (
     '#import "@preview/fletcher:0.5.8": diagram, node, edge\n'
     '#import "@local/mitex:0.2.7": mi-itex, mitex-itex\n'
-    "#set page(width: auto, height: auto, margin: 4pt, fill: white)\n"
+    "#set page(width: auto, height: auto, margin: 10pt, fill: white)\n"
     "#set text(size: 11pt)\n"
 )
 

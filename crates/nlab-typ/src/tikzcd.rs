@@ -668,6 +668,19 @@ fn parse_label(part: &str) -> Option<Label> {
     } else if !rest.is_empty() {
         parse_label_mods(&mut label, &rest);
     }
+    // rotated turnstiles render badly through rotate(); use the glyph
+    if let Some(deg) = label.rotate {
+        let t = label.tex.trim();
+        let glyph = match (t, deg.round() as i64) {
+            ("\\dashv", -90) | ("\\vdash", 90) => Some("\\bot"),
+            ("\\dashv", 90) | ("\\vdash", -90) => Some("\\top"),
+            _ => None,
+        };
+        if let Some(g) = glyph {
+            label.tex = g.to_string();
+            label.rotate = None;
+        }
+    }
     Some(label)
 }
 
@@ -1124,7 +1137,7 @@ fn est_halfwidth_pt(tex: &str) -> f64 {
                     | "end" | "array" | "aligned" | "overset" | "underset" => 0.0,
                     "quad" => 11.0,
                     "qquad" => 22.0,
-                    _ => 6.5,
+                    _ => 8.0,
                 };
                 i = j;
                 continue;
@@ -1132,7 +1145,7 @@ fn est_halfwidth_pt(tex: &str) -> f64 {
             w += match c {
                 '{' | '}' | '^' | '_' => 0.0,
                 c if c.is_whitespace() => 0.0,
-                _ => 5.3,
+                _ => 6.6,
             };
             i += 1;
         }
@@ -1289,18 +1302,38 @@ pub(crate) fn tikzcd_to_fletcher(src: &str) -> Result<(String, Vec<String>), Str
         }
     }
 
-    // \\[dim] row-spacing tweaks become fractional row offsets
+    // build the physical grid first: everything below measures in pt
+    let centers = |sizes: &[f64], sp: f64| -> Vec<f64> {
+        let mut cs = vec![0.0];
+        for i in 1..sizes.len() {
+            cs.push(cs[i - 1] + sizes[i - 1] / 2.0 + sp + sizes[i] / 2.0);
+        }
+        cs
+    };
+    let grid = PhysGrid {
+        xs: centers(&colw, colsp),
+        ys: centers(&rowh, rowsp),
+        colsp,
+        rowsp,
+    };
+
+    // \\[dim] row-spacing tweaks become fractional row offsets, scaled
+    // by the actual physical step between the rows they separate
     let mut row_off: Vec<f64> = Vec::with_capacity(row_gaps.len());
     let mut acc = 0.0;
-    for g in &row_gaps {
-        // one grid row spans the gap plus a typical node height
-        acc += g / (rowsp + 14.0);
+    for (r, g) in row_gaps.iter().enumerate() {
+        let step = if r > 0 && r < grid.ys.len() {
+            (grid.ys[r] - grid.ys[r - 1]).max(10.0)
+        } else {
+            rowsp + 14.0
+        };
+        acc += g / step;
         row_off.push(acc);
     }
     let eff = |p: (f64, f64)| -> (f64, f64) {
         let r = p.0.round();
         let off = if r >= 0.0 {
-            row_off.get(r as usize).copied().unwrap_or_else(|| acc)
+            row_off.get(r as usize).copied().unwrap_or(acc)
         } else {
             0.0
         };
@@ -1321,8 +1354,9 @@ pub(crate) fn tikzcd_to_fletcher(src: &str) -> Result<(String, Vec<String>), Str
     }
     let arrows = arrows;
 
-    // resolve name= anchors to points on their carrying arrow; a bent
-    // carrier displaces the point sideways by the arc's sagitta
+    // resolve name= anchors to points on their carrying arrow, in
+    // physical coordinates (mixing pt with grid units broke whenever
+    // rows were non-uniform)
     let mut anchors = std::collections::HashMap::new();
     for a in &arrows {
         for l in &a.labels {
@@ -1331,47 +1365,34 @@ pub(crate) fn tikzcd_to_fletcher(src: &str) -> Result<(String, Vec<String>), Str
                     resolve(&a.from, &anchors).map(&eff),
                     resolve(&a.to, &anchors).map(&eff),
                 ) {
+                    let (x1, y1) = (grid.x(f.1), grid.y(f.0));
+                    let (x2, y2) = (grid.x(t.1), grid.y(t.0));
                     let t01 = l.pos.unwrap_or(0.5);
-                    let mut p = (f.0 + t01 * (t.0 - f.0), f.1 + t01 * (t.1 - f.1));
+                    let mut px = x1 + t01 * (x2 - x1);
+                    let mut py = y1 + t01 * (y2 - y1);
+                    let (dx, dy) = (x2 - x1, y2 - y1);
+                    let len = dx.hypot(dy).max(1.0);
+                    let (nx, ny) = (dy / len, -dx / len); // left of travel
                     if let Some(bend) = a.bend {
-                        // pt-space chord and its left normal
-                        let (dx, dy) = ((t.1 - f.1) * colsp, (t.0 - f.0) * rowsp);
-                        let len = dx.hypot(dy).max(1.0);
                         let th = bend.to_radians();
-                        let sag = len * (1.0 - th.cos()).abs() / (2.0 * th.sin().abs().max(0.05));
-                        let sag = sag * bend.signum();
-                        let (nx, ny) = (dy / len, -dx / len);
-                        p = (p.0 + ny * sag / rowsp, p.1 + nx * sag / colsp);
+                        // 1.35: our width estimates undershoot fletcher's
+                        // real chord, and with it the arc's sagitta
+                        let sag = 1.35 * len * (1.0 - th.cos()).abs()
+                            / (2.0 * th.sin().abs().max(0.05));
+                        px += nx * sag * bend.signum();
+                        py += ny * sag * bend.signum();
                     }
-                    // the carrying arrow's sideways shift moves its
-                    // midpoint too (parallel-pair 2-cells depend on it)
                     if let Some(sh) = a.shift {
-                        let (dx, dy) = ((t.1 - f.1) * colsp, (t.0 - f.0) * rowsp);
-                        let len = dx.hypot(dy).max(1.0);
-                        let (nx, ny) = (dy / len, -dx / len);
-                        p = (p.0 + ny * sh / rowsp, p.1 + nx * sh / colsp);
+                        px += nx * sh;
+                        py += ny * sh;
                     }
-                    // explicit xshift/yshift on the label (pt, y down
-                    // in our row coords; tikz yshift is upward)
-                    p = (p.0 - l.yshift / rowsp, p.1 + l.xshift / colsp);
-                    anchors.insert(name.clone(), p);
+                    px += l.xshift;
+                    py -= l.yshift; // tikz yshift is upward
+                    anchors.insert(name.clone(), (grid.ry(py), grid.rx(px)));
                 }
             }
         }
     }
-    let centers = |sizes: &[f64], sp: f64| -> Vec<f64> {
-        let mut cs = vec![0.0];
-        for i in 1..sizes.len() {
-            cs.push(cs[i - 1] + sizes[i - 1] / 2.0 + sp + sizes[i] / 2.0);
-        }
-        cs
-    };
-    let grid = PhysGrid {
-        xs: centers(&colw, colsp),
-        ys: centers(&rowh, rowsp),
-        colsp,
-        rowsp,
-    };
 
     let mut lines: Vec<String> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
@@ -1494,7 +1515,7 @@ pub(crate) fn tikzcd_to_fletcher(src: &str) -> Result<(String, Vec<String>), Str
         // fuse; node cells 0 — fletcher clips at the node border itself
         let end_inset = |c: &Coord| -> f64 {
             match c {
-                Coord::Name(_) => 6.0,
+                Coord::Name(_) => 3.0,
                 Coord::Cell(r, cc) => {
                     if node_halfw.contains_key(&(*r, *cc)) {
                         0.0
