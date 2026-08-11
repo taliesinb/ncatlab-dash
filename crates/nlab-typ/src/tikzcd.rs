@@ -1787,42 +1787,51 @@ pub(crate) fn tikzcd_to_fletcher(src: &str) -> Result<(String, Vec<String>), Str
                         // explicit endpoints with snapping disabled:
                         // fletcher would re-crop shifted lanes against
                         // tall node boxes, giving rails unequal lengths
+                        // endpoints inset along the travel axis only;
+                        // the lateral offset stays a fletcher `shift`
+                        // (true pt — fractional coordinates outside the
+                        // node span extrapolate at the wrong scale)
                         let (hw1, hh1) = (node_halfw[&(*r1, *c1)], node_halfh[&(*r1, *c1)]);
                         let (hw2, hh2) = (node_halfw[&(*r2, *c2)], node_halfh[&(*r2, *c2)]);
                         let (cx1, cy1) = (grid.x(from.1), grid.y(from.0));
                         let (cx2, cy2) = (grid.x(to.1), grid.y(to.0));
                         let (p1, p2) = if horiz {
                             let sgn = (cx2 - cx1).signum();
-                            // shift is left-of-travel: +x travel -> up
-                            let dyy = -sh * sgn;
                             (
-                                (cx1 + sgn * (hw1 + 4.0), cy1 + dyy),
-                                (cx2 - sgn * (hw2 + 4.0), cy2 + dyy),
+                                (cx1 + sgn * (hw1 + 4.0), cy1),
+                                (cx2 - sgn * (hw2 + 4.0), cy2),
                             )
                         } else {
                             let sgn = (cy2 - cy1).signum();
-                            // +y (down) travel -> left is +x
-                            let dxx = sh * sgn;
                             (
-                                (cx1 + dxx, cy1 + sgn * (hh1 + 4.0)),
-                                (cx2 + dxx, cy2 - sgn * (hh2 + 4.0)),
+                                (cx1, cy1 + sgn * (hh1 + 4.0)),
+                                (cx2, cy2 - sgn * (hh2 + 4.0)),
                             )
                         };
                         rail = Some((
                             coord_str((grid.ry(p1.1), grid.rx(p1.0))),
                             coord_str((grid.ry(p2.1), grid.rx(p2.0))),
                         ));
-                        shift_arg = None;
+                        if sh.abs() < 0.01 {
+                            shift_arg = None;
+                        } else {
+                            shift_arg = Some(sh);
+                        }
                     } else if (horiz || c1 == c2) && len > 0.01 {
-                        // endpoint without a node: geometric fallback
-                        let (nx, ny) = (dy / len, -dx / len);
+                        // endpoint without a node: inset along travel,
+                        // lateral offset via fletcher shift
                         let inset = (len * 0.2).min(14.0);
-                        xa += nx * sh + dx / len * inset;
-                        ya += ny * sh + dy / len * inset;
-                        xb += nx * sh - dx / len * inset;
-                        yb += ny * sh - dy / len * inset;
-                        shift_arg = None;
-                        moved = true;
+                        xa += dx / len * inset;
+                        ya += dy / len * inset;
+                        xb -= dx / len * inset;
+                        yb -= dy / len * inset;
+                        if sh.abs() < 0.01 {
+                            shift_arg = None;
+                        }
+                        rail = Some((
+                            coord_str((grid.ry(ya), grid.rx(xa))),
+                            coord_str((grid.ry(yb), grid.rx(xb))),
+                        ));
                     }
                 }
             }
