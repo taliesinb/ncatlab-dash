@@ -106,8 +106,12 @@ def main():
     ap.add_argument("--sample", type=int, default=150)
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--rows", help="comma-separated corpus indices")
+    ap.add_argument("--out", help="output html filename (default compare-tikzcd.html)")
     ap.add_argument("--all", action="store_true")
     args = ap.parse_args()
+    global OUT
+    if args.out:
+        OUT = HERE / "out" / args.out
 
     blocks = corpus()
     converted = convert_all(blocks)

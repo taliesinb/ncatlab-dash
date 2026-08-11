@@ -885,24 +885,41 @@ fn eval_angle(v: &str) -> Option<f64> {
     v.parse().ok()
 }
 
+/// Parse a TeX length, including simple arithmetic (`32pt-7pt`).
 fn len_pt(v: &str) -> f64 {
-    let v = v.strip_prefix('+').unwrap_or(v);
-    let num: String = v
-        .chars()
-        .take_while(|c| c.is_ascii_digit() || *c == '.' || *c == '-')
-        .collect();
-    let n: f64 = num.parse().unwrap_or(0.0);
-    if v.ends_with("ex") {
-        n * 4.3
-    } else if v.ends_with("em") {
-        n * 11.0
-    } else if v.ends_with("cm") {
-        n * 28.35
-    } else if v.ends_with("mm") {
-        n * 2.835
-    } else {
-        n
+    let mut total = 0.0;
+    let mut term = String::new();
+    let flush = |term: &mut String, total: &mut f64| {
+        if term.is_empty() {
+            return;
+        }
+        let t = term.trim();
+        let (num, unit): (String, String) = {
+            let split = t
+                .find(|c: char| c.is_ascii_alphabetic())
+                .unwrap_or(t.len());
+            (t[..split].to_string(), t[split..].to_string())
+        };
+        let n: f64 = num.trim().parse().unwrap_or(0.0);
+        *total += match unit.trim() {
+            "ex" => n * 4.3,
+            "em" => n * 11.0,
+            "cm" => n * 28.35,
+            "mm" => n * 2.835,
+            _ => n,
+        };
+        term.clear();
+    };
+    for (i, c) in v.trim().chars().enumerate() {
+        if (c == '+' || c == '-') && i > 0 {
+            flush(&mut term, &mut total);
+        }
+        if c != '+' {
+            term.push(c);
+        }
     }
+    flush(&mut term, &mut total);
+    total
 }
 
 fn shift_len(v: &str) -> f64 {
@@ -913,7 +930,7 @@ fn shift_len(v: &str) -> f64 {
     let has_unit = v.ends_with("pt") || v.ends_with("em") || v.ends_with("ex")
         || v.ends_with("cm") || v.ends_with("mm");
     let n = len_pt(v);
-    let n = if has_unit { n } else { n * 3.5 };
+    let n = if has_unit { n } else { n * 2.8 };
     // clamp the magnitude only: shift right=-20pt is a LEFT shift
     n.signum() * n.abs().clamp(1.0, 45.0)
 }
@@ -1314,8 +1331,8 @@ pub(crate) fn tikzcd_to_fletcher(src: &str) -> Result<(String, Vec<String>), Str
         node_halfh.insert((*r, *c), h / 2.0);
     }
 
-    let ncols = 1 + nodes.iter().map(|(_, c, _)| *c).max().unwrap_or(0).max(2) as usize;
-    let nrows = 1 + nodes.iter().map(|(r, _, _)| *r).max().unwrap_or(0).max(2) as usize;
+    let ncols = 1 + nodes.iter().map(|(_, c, _)| *c).max().unwrap_or(0).max(0) as usize;
+    let nrows = 1 + nodes.iter().map(|(r, _, _)| *r).max().unwrap_or(0).max(0) as usize;
     let mut colw = vec![0.0f64; ncols];
     let mut rowh = vec![0.0f64; nrows];
     for ((r, c), hw) in &node_halfw {
@@ -1553,6 +1570,18 @@ pub(crate) fn tikzcd_to_fletcher(src: &str) -> Result<(String, Vec<String>), Str
         }
     }
 
+    // families of >=3 parallel arrows must all use the same lane
+    // mechanism (rails), or mixed rail/shift spacing drifts apart
+    let mut pair_count: std::collections::HashMap<((i32, i32), (i32, i32)), usize> =
+        std::collections::HashMap::new();
+    for a in &arrows {
+        if let (Coord::Cell(r1, c1), Coord::Cell(r2, c2)) = (&a.from, &a.to) {
+            let (p, q) = ((*r1, *c1), (*r2, *c2));
+            let key = if p <= q { (p, q) } else { (q, p) };
+            *pair_count.entry(key).or_insert(0) += 1;
+        }
+    }
+
     let mut lines: Vec<String> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
     let mut loops_at: std::collections::HashMap<(i32, i32), usize> =
@@ -1681,7 +1710,7 @@ pub(crate) fn tikzcd_to_fletcher(src: &str) -> Result<(String, Vec<String>), Str
         // fuse; node cells 0 — fletcher clips at the node border itself
         let end_inset = |c: &Coord| -> f64 {
             match c {
-                Coord::Name(_) => 0.5,
+                Coord::Name(_) => 2.5,
                 Coord::Cell(r, cc) => {
                     if node_halfw.contains_key(&(*r, *cc)) {
                         0.0
@@ -1692,10 +1721,32 @@ pub(crate) fn tikzcd_to_fletcher(src: &str) -> Result<(String, Vec<String>), Str
             }
         };
         if len > 0.01 {
+            // explicit shorten on a node-to-node edge starts from the
+            // node border, so fold the border exit in before shortening
+            let border = |c: &Coord, p: (f64, f64)| -> f64 {
+                if !matches!(c, Coord::Cell(..)) {
+                    return 0.0;
+                }
+                let key = (p.0.round() as i32, p.1.round() as i32);
+                let hw = node_halfw.get(&key).copied().unwrap_or(0.0);
+                let hh = node_halfh.get(&key).copied().unwrap_or(0.0);
+                let tx = if dx.abs() > 0.01 { (hw + 3.0) * len / dx.abs() } else { f64::MAX };
+                let ty = if dy.abs() > 0.01 { (hh + 3.0) * len / dy.abs() } else { f64::MAX };
+                tx.min(ty).min(len * 0.4)
+            };
+            let cell_shorten = |sh: f64, c: &Coord, p: (f64, f64)| -> f64 {
+                if sh > 0.0 && matches!(c, Coord::Cell(..)) {
+                    sh + border(c, p)
+                } else {
+                    0.0
+                }
+            };
             let mut s1 = end_inset(&a.from)
-                + if matches!(a.from, Coord::Name(_)) { a.shorten_start } else { 0.0 };
+                + if matches!(a.from, Coord::Name(_)) { a.shorten_start } else { 0.0 }
+                + cell_shorten(a.shorten_start, &a.from, from);
             let mut s2 = end_inset(&a.to)
-                + if matches!(a.to, Coord::Name(_)) { a.shorten_end } else { 0.0 };
+                + if matches!(a.to, Coord::Name(_)) { a.shorten_end } else { 0.0 }
+                + cell_shorten(a.shorten_end, &a.to, to);
             if is_anchor && len - s1 - s2 < 12.0 {
                 let s = (len - 12.0) / 2.0;
                 s1 = s;
@@ -1713,8 +1764,20 @@ pub(crate) fn tikzcd_to_fletcher(src: &str) -> Result<(String, Vec<String>), Str
         // triple rails); fletcher would draw a shifted center-to-center
         // line, so pin them to the facing node-border anchors instead
         let mut rail: Option<(String, String)> = None;
-        if let Some(sh) = shift_arg {
-            if sh.abs() > 8.0 {
+        let family = if let (Coord::Cell(r1, c1), Coord::Cell(r2, c2)) = (&a.from, &a.to) {
+            let (p, q) = ((*r1, *c1), (*r2, *c2));
+            let key = if p <= q { (p, q) } else { (q, p) };
+            pair_count.get(&key).copied().unwrap_or(0)
+        } else {
+            0
+        };
+        let rail_shift = match shift_arg {
+            Some(sh) => Some(sh),
+            None if family >= 3 => Some(0.0),
+            None => None,
+        };
+        if let Some(sh) = rail_shift {
+            if sh.abs() > 8.0 || family >= 3 {
                 if let (Coord::Cell(r1, c1), Coord::Cell(r2, c2)) = (&a.from, &a.to) {
                     let horiz = r1 == r2;
                     if (horiz || c1 == c2)
@@ -1867,14 +1930,49 @@ fn label_is_blank(tex: &str) -> bool {
     re.is_match(tex)
 }
 
+
+/// If the label is exactly `\scalebox{f}{X}`, return (f, X) so the
+/// scale applies once against the normal font size; otherwise the
+/// default label size.
+fn scalebox_label(tex: &str) -> (f64, String) {
+    let t = strip_braces(tex.trim());
+    if let Some(rest) = t.strip_prefix("\\scalebox") {
+        let b: Vec<char> = rest.chars().collect();
+        let mut k = 0;
+        while k < b.len() && b[k].is_whitespace() {
+            k += 1;
+        }
+        if let Some((f, end)) = read_group(&b, k, '{', '}') {
+            if let Ok(factor) = f.trim().parse::<f64>().or_else(|_| {
+                format!("0{}", f.trim()).parse::<f64>()
+            }) {
+                let mut k2 = end;
+                while k2 < b.len() && b[k2].is_whitespace() {
+                    k2 += 1;
+                }
+                if let Some((inner, end2)) = read_group(&b, k2, '{', '}') {
+                    if b[end2..].iter().all(|c| c.is_whitespace()) {
+                        return (factor.clamp(0.4, 1.0), inner);
+                    }
+                }
+            }
+        }
+    }
+    (0.75, tex.to_string())
+}
+
 fn push_label_args(args: &mut Vec<String>, l: &Label, centered: bool, color: Option<&str>) {
     let fill = color.map(|c| format!("fill: {}, ", c)).unwrap_or_default();
-    let mut content = format!("mi({})", emit::ts(&clean_tex(&l.tex)));
+    // a label that is exactly \scalebox{f}{X} means "X at f x normal
+    // size" in tikz; stacking the native scalebox onto our 0.75em label
+    // size would double-shrink it
+    let (size, tex) = scalebox_label(&l.tex);
+    let mut content = format!("mi({})", emit::ts(&clean_tex(&tex)));
     if let Some(deg) = l.rotate {
         // tikz rotates counterclockwise for positive angles, typst clockwise
         content = format!("rotate({}deg, reflow: true, {})", fmt_f(-deg), content);
     }
-    args.push(format!("label: text(0.75em, {}{})", fill, content));
+    args.push(format!("label: text({}em, {}{})", fmt_f(size), fill, content));
     if l.marking {
         // ticks/bullets drawn on the stroke: don't crop the line
         args.push("label-fill: none".into());
