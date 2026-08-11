@@ -1747,10 +1747,14 @@ pub(crate) fn tikzcd_to_fletcher(src: &str) -> Result<(String, Vec<String>), Str
             let mut s2 = end_inset(&a.to)
                 + if matches!(a.to, Coord::Name(_)) { a.shorten_end } else { 0.0 }
                 + cell_shorten(a.shorten_end, &a.to, to);
-            if is_anchor && len - s1 - s2 < 12.0 {
-                let s = (len - 12.0) / 2.0;
-                s1 = s;
-                s2 = s;
+            // never shorten an arrow below legibility, whether the
+            // endpoints are anchors or heavily set-back cells
+            let heavy = a.shorten_start + a.shorten_end > 0.0;
+            if (is_anchor || heavy) && len - s1 - s2 < 14.0 {
+                let keep = (s1 - s2) / 2.0; // preserve asymmetry a bit
+                let mid = (len - 14.0) / 2.0;
+                s1 = mid + keep.clamp(-4.0, 4.0);
+                s2 = mid - keep.clamp(-4.0, 4.0);
             }
             if s1 != 0.0 || s2 != 0.0 {
                 xa += dx / len * s1;
