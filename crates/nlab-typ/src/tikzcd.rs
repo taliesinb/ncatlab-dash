@@ -1755,6 +1755,18 @@ pub(crate) fn tikzcd_to_fletcher(src: &str) -> Result<(String, Vec<String>), Str
                 let mid = (len - 14.0) / 2.0;
                 s1 = mid + keep.clamp(-4.0, 4.0);
                 s2 = mid - keep.clamp(-4.0, 4.0);
+                // an anchor marks a real point on a carrier arrow:
+                // never extend past it (2-cells must not pierce arcs)
+                if matches!(a.from, Coord::Name(_)) && s1 < 0.0 {
+                    s2 += s1;
+                    s1 = 0.0;
+                }
+                if matches!(a.to, Coord::Name(_)) && s2 < 0.0 {
+                    s1 += s2;
+                    s2 = 0.0;
+                }
+                s1 = s1.max(if matches!(a.from, Coord::Name(_)) { 0.0 } else { s1 });
+                s2 = s2.max(if matches!(a.to, Coord::Name(_)) { 0.0 } else { s2 });
             }
             if s1 != 0.0 || s2 != 0.0 {
                 xa += dx / len * s1;
@@ -1980,6 +1992,11 @@ fn push_label_args(args: &mut Vec<String>, l: &Label, centered: bool, color: Opt
     // size" in tikz; stacking the native scalebox onto our 0.75em label
     // size would double-shrink it
     let (size, tex) = scalebox_label(&l.tex);
+    let corner = matches!(
+        tex.trim().trim_matches(|c| c == '{' || c == '}' || c == ' '),
+        "\\lrcorner" | "\\ulcorner" | "\\llcorner" | "\\urcorner"
+    );
+    let size = if corner { size.max(1.0) } else { size };
     let mut content = format!("mi({})", emit::ts(&clean_tex(&tex)));
     if let Some(deg) = l.rotate {
         // tikz rotates counterclockwise for positive angles, typst clockwise
