@@ -1550,7 +1550,10 @@ pub(crate) fn tikzcd_to_fletcher(src: &str) -> Result<(String, Vec<String>), Str
                     let (nx, ny) = (dy / len, -dx / len); // left of travel
                     if let Some(bend) = a.bend {
                         let th = bend.to_radians();
-                        let sag = len * (1.0 - th.cos()).abs()
+                        // probes: fletcher sags ~0.90x the circular
+                        // formula at 20deg, ~1.0x at 45deg
+                        let f = (0.85 + bend.abs() / 300.0).min(1.0);
+                        let sag = f * len * (1.0 - th.cos()).abs()
                             / (2.0 * th.sin().abs().max(0.05));
                         px += nx * sag * bend.signum();
                         py += ny * sag * bend.signum();
