@@ -1506,6 +1506,8 @@ pub(crate) fn tikzcd_to_fletcher(src: &str) -> Result<(String, Vec<String>), Str
     // physical coordinates (mixing pt with grid units broke whenever
     // rows were non-uniform)
     let mut anchors = std::collections::HashMap::new();
+    let mut anchor_ext: std::collections::HashMap<String, (f64, f64)> =
+        std::collections::HashMap::new();
     for a in &arrows {
         for l in &a.labels {
             if let Some(name) = &l.name {
@@ -1567,6 +1569,14 @@ pub(crate) fn tikzcd_to_fletcher(src: &str) -> Result<(String, Vec<String>), Str
                     if std::env::var("NLAB_DEBUG_ANCHORS").is_ok() {
                         debug_dots.push((grid.ry(py), grid.rx(px)));
                     }
+                    // a visible label carrying the anchor occupies
+                    // space: 2-cells must stop at its border
+                    let ext = if label_is_blank(&l.tex) {
+                        (0.0, 0.0)
+                    } else {
+                        (0.75 * est_halfwidth_pt(&clean_tex(&l.tex)) + 2.0, 5.5)
+                    };
+                    anchor_ext.insert(name.clone(), ext);
                     anchors.insert(name.clone(), (grid.ry(py), grid.rx(px)));
                 }
             }
@@ -1713,7 +1723,10 @@ pub(crate) fn tikzcd_to_fletcher(src: &str) -> Result<(String, Vec<String>), Str
         // fuse; node cells 0 — fletcher clips at the node border itself
         let end_inset = |c: &Coord| -> f64 {
             match c {
-                Coord::Name(_) => 2.5,
+                Coord::Name(n) => {
+                    let (hw, hh) = anchor_ext.get(n).copied().unwrap_or((0.0, 0.0));
+                    2.5 + (dx.abs() * hw + dy.abs() * hh) / len.max(1.0)
+                }
                 Coord::Cell(r, cc) => {
                     if node_halfw.contains_key(&(*r, *cc)) {
                         0.0
