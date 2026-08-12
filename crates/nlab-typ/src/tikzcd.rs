@@ -1030,7 +1030,7 @@ fn extract_arrows(cell: &str, r: i32, c: i32, arrows: &mut Vec<Arrow>) -> Result
 
 fn spacing_from_opts(opts: &str) -> (f64, f64) {
     // defaults match the array emitter's diagram spacing
-    let (mut col, mut row) = (2.6f64 * 11.0, 2.2 * 11.0); // in pt (11pt em)
+    let (mut col, mut row) = (52.0f64, 27.0); // tuned against server-render medians
     for tok in split_args(opts) {
         let t = tok.trim().replace(' ', "");
         let apply = |v: &str, cur: f64| -> f64 {
@@ -1581,7 +1581,7 @@ pub(crate) fn tikzcd_to_fletcher(src: &str) -> Result<(String, Vec<String>), Str
                     let ext = if label_is_blank(&l.tex) {
                         (0.0, 0.0)
                     } else {
-                        (0.75 * est_halfwidth_pt(&clean_tex(&l.tex)) + 2.0, 5.5)
+                        (0.7 * est_halfwidth_pt(&clean_tex(&l.tex)) + 0.5, 4.5)
                     };
                     anchor_ext.insert(name.clone(), ext);
                     anchors.insert(name.clone(), (grid.ry(py), grid.rx(px)));
@@ -1799,9 +1799,12 @@ pub(crate) fn tikzcd_to_fletcher(src: &str) -> Result<(String, Vec<String>), Str
                 s1 = f1.min(s1);
                 s2 = f2.min(s2);
             }
-            // never invert the edge: cap total shortening
-            if s1 + s2 > len - 3.0 {
-                let scale = (len - 3.0).max(1.0) / (s1 + s2);
+            // guarantee a legible shaft by scaling ALL shortening
+            // components down proportionally — ends move toward their
+            // anchors, never past them, so carriers are never pierced
+            let min_shaft = if is_anchor { 9.0 } else { 3.0 };
+            if s1 + s2 > 0.0 && len - s1 - s2 < min_shaft {
+                let scale = ((len - min_shaft) / (s1 + s2)).clamp(0.0, 1.0);
                 s1 *= scale;
                 s2 *= scale;
             }
