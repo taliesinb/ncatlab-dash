@@ -31,6 +31,7 @@ struct Label {
     name: Option<String>,
     rotate: Option<f64>,
     marking: bool,
+    abs_place: Option<char>, // a/b/l/r: absolute above/below/left/right
     xshift: f64, // pt, for name= anchor placement
     yshift: f64,
 }
@@ -609,8 +610,11 @@ fn parse_label_mods(label: &mut Label, mods: &str) {
                 label.side = Side::Center;
                 label.marking = true;
             }
-            "swap" | "below" | "right" => label.side = Side::Right,
-            "above" | "left" => {}
+            "swap" => label.side = Side::Right,
+            "above" => label.abs_place = Some('a'),
+            "below" => label.abs_place = Some('b'),
+            "left" => label.abs_place = Some('l'),
+            "right" => label.abs_place = Some('r'),
             "sloped" => label.sloped = true,
             "near start" => label.pos = Some(0.25),
             "very near start" => label.pos = Some(0.1),
@@ -654,6 +658,7 @@ fn parse_label(part: &str) -> Option<Label> {
         name: None,
         rotate: None,
         marking: false,
+        abs_place: None,
         xshift: 0.0,
         yshift: 0.0,
     };
@@ -1006,6 +1011,7 @@ fn extract_arrows(cell: &str, r: i32, c: i32, arrows: &mut Vec<Arrow>) -> Result
                                 name: None,
                                 rotate: None,
                                 marking: false,
+                                abs_place: None,
                                 xshift: 0.0,
                                 yshift: 0.0,
                             });
@@ -1958,6 +1964,30 @@ pub(crate) fn tikzcd_to_fletcher(src: &str) -> Result<(String, Vec<String>), Str
             .iter()
             .map(|l| {
                 let mut l = l.clone();
+                // absolute above/below/left/right resolve against the
+                // travel direction (tikz sides are absolute; ours are
+                // travel-relative)
+                if let Some(p) = l.abs_place {
+                    // left normal in y-down coords is (dy, -dx)
+                    let (nx, ny) = (dy, -dx);
+                    let want = match p {
+                        'a' => ny < -0.01,
+                        'b' => ny > 0.01,
+                        'l' => nx < -0.01,
+                        _ => nx > 0.01,
+                    };
+                    let opposite = match p {
+                        'a' => ny > 0.01,
+                        'b' => ny < -0.01,
+                        'l' => nx > 0.01,
+                        _ => nx < -0.01,
+                    };
+                    if want {
+                        l.side = Side::Left;
+                    } else if opposite {
+                        l.side = Side::Right;
+                    }
+                }
                 if a.swap {
                     l.side = match l.side {
                         Side::Left => Side::Right,
