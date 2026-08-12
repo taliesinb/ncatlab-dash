@@ -1564,6 +1564,13 @@ pub(crate) fn tikzcd_to_fletcher(src: &str) -> Result<(String, Vec<String>), Str
                         px += nx * sh;
                         py += ny * sh;
                     }
+                    // a side label sits off the carrier line; its
+                    // anchor is the label's own position, not the line
+                    if !label_is_blank(&l.tex) && l.side != Side::Center {
+                        let sgn = if l.side == Side::Left { 1.0 } else { -1.0 };
+                        px += nx * sgn * 7.0;
+                        py += ny * sgn * 7.0;
+                    }
                     px += l.xshift;
                     py -= l.yshift; // tikz yshift is upward
                     if std::env::var("NLAB_DEBUG_ANCHORS").is_ok() {
@@ -1757,32 +1764,44 @@ pub(crate) fn tikzcd_to_fletcher(src: &str) -> Result<(String, Vec<String>), Str
                     0.0
                 }
             };
-            let mut s1 = end_inset(&a.from)
+            let base1 = end_inset(&a.from);
+            let base2 = end_inset(&a.to);
+            let mut s1 = base1
                 + if matches!(a.from, Coord::Name(_)) { a.shorten_start } else { 0.0 }
                 + cell_shorten(a.shorten_start, &a.from, from);
-            let mut s2 = end_inset(&a.to)
+            let mut s2 = base2
                 + if matches!(a.to, Coord::Name(_)) { a.shorten_end } else { 0.0 }
                 + cell_shorten(a.shorten_end, &a.to, to);
-            // never shorten an arrow below legibility, whether the
-            // endpoints are anchors or heavily set-back cells
+            // never shorten an arrow below legibility — but an anchor
+            // end must keep its clearance from the carrier: it neither
+            // extends past the anchor nor eats into the inset, so a
+            // cramped 2-cell simply stays short
             let heavy = a.shorten_start + a.shorten_end > 0.0;
             if (is_anchor || heavy) && len - s1 - s2 < 14.0 {
                 let keep = (s1 - s2) / 2.0; // preserve asymmetry a bit
                 let mid = (len - 14.0) / 2.0;
-                s1 = mid + keep.clamp(-4.0, 4.0);
-                s2 = mid - keep.clamp(-4.0, 4.0);
-                // an anchor marks a real point on a carrier arrow:
-                // never extend past it (2-cells must not pierce arcs)
-                if matches!(a.from, Coord::Name(_)) && s1 < 0.0 {
-                    s2 += s1;
-                    s1 = 0.0;
-                }
-                if matches!(a.to, Coord::Name(_)) && s2 < 0.0 {
-                    s1 += s2;
-                    s2 = 0.0;
-                }
-                s1 = s1.max(if matches!(a.from, Coord::Name(_)) { 0.0 } else { s1 });
-                s2 = s2.max(if matches!(a.to, Coord::Name(_)) { 0.0 } else { s2 });
+                let floor1 = if matches!(a.from, Coord::Name(_)) { base1 } else { f64::MIN };
+                let floor2 = if matches!(a.to, Coord::Name(_)) { base2 } else { f64::MIN };
+                let t1 = mid + keep.clamp(-4.0, 4.0);
+                let t2 = mid - keep.clamp(-4.0, 4.0);
+                let (f1, f2) = (t1.max(floor1), t2.max(floor2));
+                // slack from a floored end goes to the free end if any
+                let spill = (f1 - t1) + (f2 - t2);
+                let (f1, f2) = if floor1 == f64::MIN {
+                    ((f1 - spill).max(f64::MIN), f2)
+                } else if floor2 == f64::MIN {
+                    (f1, f2 - spill)
+                } else {
+                    (f1, f2)
+                };
+                s1 = f1.min(s1);
+                s2 = f2.min(s2);
+            }
+            // never invert the edge: cap total shortening
+            if s1 + s2 > len - 3.0 {
+                let scale = (len - 3.0).max(1.0) / (s1 + s2);
+                s1 *= scale;
+                s2 *= scale;
             }
             if s1 != 0.0 || s2 != 0.0 {
                 xa += dx / len * s1;
