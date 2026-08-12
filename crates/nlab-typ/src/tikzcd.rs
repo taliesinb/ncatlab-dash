@@ -1776,8 +1776,10 @@ pub(crate) fn tikzcd_to_fletcher(src: &str) -> Result<(String, Vec<String>), Str
             // end must keep its clearance from the carrier: it neither
             // extends past the anchor nor eats into the inset, so a
             // cramped 2-cell simply stays short
-            let heavy = a.shorten_start + a.shorten_end > 0.0;
-            if (is_anchor || heavy) && len - s1 - s2 < 14.0 {
+            let heavy = a.shorten_start + a.shorten_end > 0.0
+                && matches!(a.from, Coord::Cell(..))
+                && matches!(a.to, Coord::Cell(..));
+            if heavy && len - s1 - s2 < 14.0 {
                 let keep = (s1 - s2) / 2.0; // preserve asymmetry a bit
                 let mid = (len - 14.0) / 2.0;
                 let floor1 = if matches!(a.from, Coord::Name(_)) { base1 } else { f64::MIN };
