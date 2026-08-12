@@ -1432,7 +1432,39 @@ pub(crate) fn tikzcd_to_fletcher(src: &str) -> Result<(String, Vec<String>), Str
     // pentagons and stretched cubes both come from a fixed row spacing
     // that ignores how wide the columns actually are
     let norm_opts = opts.replace(' ', "");
-    if !norm_opts.contains("rowsep=") && !norm_opts.contains("sep=") {
+    let has_rowsep = norm_opts.contains("rowsep=")
+        || norm_opts.replace("columnsep=", "").contains("sep=");
+    let has_colsep = norm_opts.contains("columnsep=")
+        || norm_opts.replace("rowsep=", "").contains("sep=");
+    // author set rows but not columns: fit columns to the diagonals
+    if has_rowsep && !has_colsep {
+        let xs_now = {
+            let mut cs = vec![0.0];
+            for i in 1..colw.len() {
+                cs.push(cs[i - 1] + colw[i - 1] / 2.0 + colsp + colw[i] / 2.0);
+            }
+            cs
+        };
+        let mut factors: Vec<f64> = Vec::new();
+        for a in &arrows {
+            if let (Coord::Cell(r1, c1), Coord::Cell(r2, c2)) = (&a.from, &a.to) {
+                let (dr, dc) = ((r2 - r1).abs(), (c2 - c1).abs());
+                if dr > 0 && dc > 0 {
+                    let x1 = xs_now.get(*c1 as usize).copied().unwrap_or(0.0);
+                    let x2 = xs_now.get(*c2 as usize).copied().unwrap_or(0.0);
+                    let dx = (x2 - x1).abs().max(1.0);
+                    let dy = dr as f64 * (rowsp + 14.0);
+                    factors.push(dy / (0.55 * dx));
+                }
+            }
+        }
+        if factors.len() >= 2 {
+            factors.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let f = factors[factors.len() / 2].clamp(0.35, 1.0);
+            colsp = (colsp * f).max(12.0);
+        }
+    }
+    if !has_rowsep {
         let xs_tmp = {
             let mut cs = vec![0.0];
             for i in 1..colw.len() {
@@ -1578,10 +1610,23 @@ pub(crate) fn tikzcd_to_fletcher(src: &str) -> Result<(String, Vec<String>), Str
                     }
                     // a visible label carrying the anchor occupies
                     // space: 2-cells must stop at its border
+                    let ext_of = |tex: &str| {
+                        (0.7 * est_halfwidth_pt(&clean_tex(tex)) + 0.5, 4.5)
+                    };
                     let ext = if label_is_blank(&l.tex) {
-                        (0.0, 0.0)
+                        // a blank anchor often shares its spot with a
+                        // visible label on the same carrier (66's rho3)
+                        a.labels
+                            .iter()
+                            .find(|o| {
+                                !label_is_blank(&o.tex)
+                                    && (o.pos.unwrap_or(0.5) - l.pos.unwrap_or(0.5)).abs()
+                                        < 0.15
+                            })
+                            .map(|o| ext_of(&o.tex))
+                            .unwrap_or((0.0, 0.0))
                     } else {
-                        (0.7 * est_halfwidth_pt(&clean_tex(&l.tex)) + 0.5, 4.5)
+                        ext_of(&l.tex)
                     };
                     anchor_ext.insert(name.clone(), ext);
                     anchors.insert(name.clone(), (grid.ry(py), grid.rx(px)));
@@ -1949,9 +1994,20 @@ pub(crate) fn tikzcd_to_fletcher(src: &str) -> Result<(String, Vec<String>), Str
             args.push(format!("stroke: {}", c));
         }
         lines.push(format!("  edge({}),", args.join(", ")));
+        let first_side = a.labels.iter().find(|l| !label_is_blank(&l.tex)).map(|l| l.side);
         for l in extra_labels {
             let mut args = vec![v1.clone(), v2.clone(), "\"-\"".to_string()];
-            push_label_args(&mut args, l, true, a.color.as_deref());
+            // an unmodified second label goes on the opposite side of
+            // the first, never centered on the shaft
+            let mut l2 = l.clone();
+            if l2.side == Side::Left {
+                l2.side = match first_side {
+                    Some(Side::Left) => Side::Right,
+                    Some(Side::Right) => Side::Left,
+                    _ => Side::Right,
+                };
+            }
+            push_label_args(&mut args, &l2, false, a.color.as_deref());
             if let Some(bend) = a.bend {
                 args.push(format!("bend: {}deg", fmt_f(bend)));
             }
